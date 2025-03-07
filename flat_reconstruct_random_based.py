@@ -16,8 +16,8 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 run = neptune.init_run(
-    project="?",
-    api_token="?",
+    project="tns/Vqvae-transformer",
+    api_token="eyJhcGlfYWRkcmVzcyI6Imh0dHBzOi8vYXBwLm5lcHR1bmUuYWkiLCJhcGlfdXJsIjoiaHR0cHM6Ly9hcHAubmVwdHVuZS5haSIsImFwaV9rZXkiOiIwODg4OTU0Yy0xODAyLTRiM2QtYjYzYi0xMWQxYThmYWJlOWQifQ==",
     capture_stdout = False,
     capture_stderr = False,
     # with_id="MAS-389"
@@ -82,11 +82,12 @@ def main(args):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     args.distributed = dist.get_world_size() > 1
 
-    indices = np.load('/home/abghamtm/work/masking_comparison/checkpoint/vqvae/indices_epoch100_flat_vqvae80x80_144x456codebook.npy')
+    indices = np.load('/home/abghamtm/work/masking_comparison/checkpoint/vqvae/indices_epoch80_flat_vqvae80x80_144x456codebook.npy')
     n, h, w = indices.shape
     indices = indices.reshape(n, h * w)
 
-    quantizes = np.load('/home/abghamtm/work/masking_comparison/checkpoint/vqvae/quantized_epoch100_flat_vqvae80x80_144x456codebook.npy')
+    quantizes = np.load('/home/abghamtm/work/masking_comparison/checkpoint/vqvae/quantized_epoch80_flat_vqvae80x80_144x456codebook.npy')
+    quant_b = quantizes
     n, c, h, w = quantizes.shape
     quantizes = quantizes.transpose(0, 2, 3, 1)
     quantizes = quantizes.reshape(n, h * w, c)
@@ -153,7 +154,7 @@ def main(args):
             q = torch.reshape(q, (1, q.size(dim=0), q.size(dim=1)))
             
             with torch.no_grad():
-                q_masked, index_masked, mask = random_mask( q, index , n_sample, n_token,perc)                                
+                q_masked, index_masked, mask = random_mask(q, index , n_sample, n_token,perc)                                
                 q_masked = q_masked.to(device)
                 index_masked = index_masked.to(device)
 
@@ -173,12 +174,13 @@ def main(args):
                 distil_out = model_vqvae.decode_code(torch.reshape(confidence_based_recons_index, (1,length,length)).to(device))
 
                 #Reconstruct Original
-                vqvae_out = model_vqvae.decode_code(torch.reshape(torch.from_numpy(indices[x]), (1,length,length)).to(device))
+                vqvae_out = model_vqvae.decode(torch.from_numpy(quant_b[x]).to(device)) #torch.reshape(torch.from_numpy(indices[x]), (1,length,length)).to(device)
                 index_masked_forvis = index.clone()
                 index_masked_forvis[mask]=0
-                vqvae_masked_out = model_vqvae.decode_code(torch.reshape(index_masked_forvis, (1,length,length)).to(device))
+                vqvae_masked_out = model_vqvae.decode(torch.from_numpy(quant_b[x]).to(device)) #torch.reshape(index_masked_forvis, (1,length,length)).to(device)
 
                 # Label outputs
+                vqvae_out = vqvae_out.unsqueeze(0)
                 vqvae_img = preprocess(vqvae_out)
                 vqvae_img = vqvae_img.to(device)
                 vqvae_img_prob = classifier(vqvae_img)
@@ -198,14 +200,15 @@ def main(args):
                 print(tot_sample)
 
 
-                if x%5 ==0:
-                    utils.save_image(
-                        torch.cat([vqvae_out, vqvae_masked_out, distil_out], 0).to(device),
-                        f"image/recons/random/80x80_random_{vqvae_img_label.item()}_{rand_mask_img_label.item()}_{int(perc*100)}_{str(x).zfill(5)}.png",
-                        nrow=3,
-                        normalize=True,
-                        range=(-1, 1),
-                    )
+                # if x%5 ==0:
+                vqvae_masked_out = vqvae_masked_out.unsqueeze(0)
+                utils.save_image(
+                    torch.cat([vqvae_out, vqvae_masked_out, distil_out], 0).to(device),
+                    f"image/recons/random/80x80_random_{vqvae_img_label.item()}_{rand_mask_img_label.item()}_{int(perc*100)}_{str(x).zfill(5)}.png",
+                    nrow=3,
+                    normalize=True,
+                    range=(-1, 1),
+                )
             
             recon_loss = criterion(distil_out, vqvae_out)
             run["recons/mse_per_image_random_mask"].log(recon_loss.item())
@@ -243,9 +246,8 @@ if __name__ == "__main__":
     )
     parser.add_argument("--dist_url", default=f"tcp://127.0.0.1:{port}")
     parser.add_argument("--batch_size", type=int, default=64)
-    parser.add_argument('--ckpt_vqvae', type=str, default="/home/abghamtm/work/masking_comparison/checkpoint/vqvae/model_epoch100_flat_vqvae80x80_144x456codebook.pth")
-    parser.add_argument('--ckpt_distil_combined', type=str, default="/home/abghamtm/work/masking_comparison/checkpoint/distil/80x80_100ClassImagenet_flat_144x456codebook_75mask_epoch045.pt")
-
+    parser.add_argument('--ckpt_vqvae', type=str, default="/home/abghamtm/work/masking_comparison/checkpoint/vqvae/model_epoch80_flat_vqvae80x80_144x456codebook.pth")
+    parser.add_argument('--ckpt_distil_combined', type=str, default="/home/abghamtm/work/masking_comparison/checkpoint/distil/80x80_100ClassImagenet_flat_144x456codebook_75mask_epoch100.pt")
 
     args = parser.parse_args()
     dist.launch(main, args.n_gpu, 1, 0, args.dist_url, args=(args,))

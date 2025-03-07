@@ -11,14 +11,14 @@ import distributed as dist
 from transformers import DistilBertForMaskedLM, DistilBertConfig
 import neptune.new as neptune
 
-# os. nice (19)
-# run = neptune.init_run(
-#     project="tns/Vqvae-transformer",
-#     api_token="",
-#     capture_stdout = False,
-#     capture_stderr = False,
-#     with_id="VQVAET-6"
-# )
+os. nice (19)
+run = neptune.init_run(
+    project="tns/Vqvae-transformer",
+    api_token="eyJhcGlfYWRkcmVzcyI6Imh0dHBzOi8vYXBwLm5lcHR1bmUuYWkiLCJhcGlfdXJsIjoiaHR0cHM6Ly9hcHAubmVwdHVuZS5haSIsImFwaV9rZXkiOiIwODg4OTU0Yy0xODAyLTRiM2QtYjYzYi0xMWQxYThmYWJlOWQifQ==",
+    capture_stdout = False,
+    capture_stderr = False,
+    with_id="VQVAET-6"
+)
 
 
 class CustomDataset(Dataset):
@@ -70,8 +70,8 @@ def train(epoch, loader, model, optimizer, scheduler, device, val_loader=None):
                     f"lr: {lr:.5f}"
                 )
             )
-        # run["train/loss"].log(loss)
-        # run["train/lr"].log(lr)
+        run["train/loss"].log(loss)
+        run["train/lr"].log(lr)
 
 
     ##validation
@@ -96,7 +96,7 @@ def train(epoch, loader, model, optimizer, scheduler, device, val_loader=None):
                 outputs = model(inputs_embeds = input,labels =label)
                 val_loss, _ = outputs[:2]
                 val_loss = val_loss.mean()
-                # run["validation/loss"].log(val_loss)
+                run["validation/loss"].log(val_loss)
                 average_loss += val_loss
 
                 val_loader.set_description(
@@ -105,12 +105,12 @@ def train(epoch, loader, model, optimizer, scheduler, device, val_loader=None):
                         )
                     )
         average_loss = average_loss/ j
-        # run["validation/average_loss_per_epoch"].log(average_loss)
+        run["validation/average_loss_per_epoch"].log(average_loss)
         return average_loss
         
 
 def main(args):
-    os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
+    os.environ["CUDA_VISIBLE_DEVICES"] = "1"
     torch.cuda.empty_cache()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     args.distributed = dist.get_world_size() > 1
@@ -121,11 +121,11 @@ def main(args):
     # val_quantizes = np.load('/work/reyhasjb/Imagenet/100class/latent/val_100class/flat/80x80_100ClassImagenet_flat_144x456codebook_div0001456_onlinecbupdate_10ws_128bs_quantizes.npy')
     
     #### train set###
-    train_indices = np.load('/home/abghamtm/work/masking_comparison/checkpoint/vqvae/indices_epoch100_flat_vqvae80x80_144x456codebook.npy')
+    train_indices = np.load('/home/abghamtm/work/masking_comparison/checkpoint/vqvae/indices_epoch80_flat_vqvae80x80_144x456codebook.npy')
     n, h, w = train_indices.shape
     train_indices = train_indices.reshape(n, h * w)
 
-    train_quantizes = np.load('/home/abghamtm/work/masking_comparison/checkpoint/vqvae/quantized_epoch100_flat_vqvae80x80_144x456codebook.npy')
+    train_quantizes = np.load('/home/abghamtm/work/masking_comparison/checkpoint/vqvae/quantized_epoch80_flat_vqvae80x80_144x456codebook.npy')
     n, c, h, w = train_quantizes.shape
     train_quantizes = train_quantizes.transpose(0, 2, 3, 1)
     train_quantizes = train_quantizes.reshape(n, h * w, c)
@@ -144,7 +144,7 @@ def main(args):
     mask_token_label = -100
     mask_perc = 0.75
     mask_train = np.random.default_rng().choice([True, False], size=(n_train_samples, n_tokens), p=[mask_perc, 1 - mask_perc])
-    # run["data/mask_prec"].log(mask_perc)
+    run["data/mask_prec"].log(mask_perc)
     train_quantizes = train_quantizes.reshape((n_train_samples, n_tokens, d_embed_vec))
     train_indices = train_indices.reshape((n_train_samples, n_tokens))
     train_quantizes[mask_train] = mask_token
@@ -207,7 +207,7 @@ def main(args):
     )
 
     model = DistilBertForMaskedLM(cfg)
-    model.load_state_dict(torch.load(args.ckpt_distil))
+    # model.load_state_dict(torch.load(args.ckpt_distil))
     model = torch.nn.DataParallel(model)
     model = model.to(device)
 
@@ -238,10 +238,10 @@ def main(args):
             epochs=args.epoch,
             anneal_strategy='linear')
     warmup = 0.01
-    # run["parameters/warmup"].log(warmup)
+    run["parameters/warmup"].log(warmup)
 
     #Train
-    j=6
+    j=0
     min_validation_loss = np.inf
     for i in range(args.epoch):
         j = j+1
@@ -249,7 +249,7 @@ def main(args):
         train(i, train_dataloader, model, optimizer, scheduler, device)
         torch.cuda.empty_cache()
         # validation_loss =train(i, train_dataloader,val_dataloader, model, optimizer, scheduler, device)
-        # run["train/epoch"].log(j)
+        run["train/epoch"].log(j)
         # if validation_loss< min_validation_loss:
         #     min_validation_loss = validation_loss
         #     print(f'Validation loss decreased to : {min_validation_loss}')
@@ -275,11 +275,11 @@ if __name__ == "__main__":
     parser.add_argument("--dist_url", default=f"tcp://127.0.0.1:{port}")
 
     #parser.add_argument("--size", type=int, default=80)
-    parser.add_argument("--epoch", type=int, default=50)
+    parser.add_argument("--epoch", type=int, default=100)
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--lr", type=float, default=0.0001)
     parser.add_argument("--sched", type=str, default="linearW")
-    parser.add_argument('--ckpt_distil', type=str, default="/home/abghamtm/work/masking_comparison/checkpoint/distil/80x80_100ClassImagenet_flat_144x456codebook_75mask_epoch006.pt")
+    # parser.add_argument('--ckpt_distil', type=str, default="/home/abghamtm/work/masking_comparison/checkpoint/distil/80x80_100ClassImagenet_flat_144x456codebook_75mask_epoch006.pt")
     args = parser.parse_args()
 
     params = {
@@ -287,7 +287,7 @@ if __name__ == "__main__":
     "bs": args.batch_size,
     "scheduler": args.sched
 }
-    # run["parameters"] = params
+    run["parameters"] = params
 
     print(args)
 
