@@ -177,7 +177,7 @@ def main(args):
                 vqvae_out = model_vqvae.decode(torch.from_numpy(quant_b[x]).to(device)) #torch.reshape(torch.from_numpy(indices[x]), (1,length,length)).to(device)
                 index_masked_forvis = index.clone()
                 index_masked_forvis[mask]=0
-                vqvae_masked_out = model_vqvae.decode(torch.from_numpy(quant_b[x]).to(device)) #torch.reshape(index_masked_forvis, (1,length,length)).to(device)
+                vqvae_masked_out = model_vqvae.decode_code(torch.reshape(index_masked_forvis, (1,length,length)).to(device))
 
                 # Label outputs
                 vqvae_out = vqvae_out.unsqueeze(0)
@@ -200,15 +200,15 @@ def main(args):
                 print(tot_sample)
 
 
-                # if x%5 ==0:
-                vqvae_masked_out = vqvae_masked_out.unsqueeze(0)
-                utils.save_image(
-                    torch.cat([vqvae_out, vqvae_masked_out, distil_out], 0).to(device),
-                    f"image/recons/random/80x80_random_{vqvae_img_label.item()}_{rand_mask_img_label.item()}_{int(perc*100)}_{str(x).zfill(5)}.png",
-                    nrow=3,
-                    normalize=True,
-                    range=(-1, 1),
-                )
+                if x%5 ==0:
+                    vqvae_masked_out = vqvae_masked_out.unsqueeze(0)
+                    utils.save_image(
+                        torch.cat([vqvae_out, vqvae_masked_out, distil_out], 0).to(device),
+                        f"image/recons/random/80x80_random_{vqvae_img_label.item()}_{rand_mask_img_label.item()}_{int(perc*100)}_{str(x).zfill(5)}.png",
+                        nrow=3,
+                        normalize=True,
+                        range=(-1, 1),
+                    )
             
             recon_loss = criterion(distil_out, vqvae_out)
             run["recons/mse_per_image_random_mask"].log(recon_loss.item())
