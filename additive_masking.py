@@ -33,30 +33,31 @@ def mask(unmasked_quantizes, unmasked_indices, n_token, unmask_pattern=None):
    
     return masked, indices_masked, mask_pattern[0][0]
 
-def extract_min_indices(distil_output, n_token):
-    min_values, min_row_indices = torch.min(distil_output.logits, dim=1)
-    min_values_flat = min_values.flatten()
-    min_row_indices_flat = min_row_indices.flatten()
-    # column_indices_flat = torch.arange(456).repeat(1, 1).flatten()
-    top_min_values, top_indices = torch.topk(min_values_flat, n_token, largest=False)
-    top_row_indices = min_row_indices_flat[top_indices]
-    return list(top_row_indices.cpu().numpy())
+# def extract_min_indices(distil_output, n_token):
+#     min_values, min_row_indices = torch.min(distil_output.logits, dim=1)
+#     min_values_flat = min_values.flatten()
+#     min_row_indices_flat = min_row_indices.flatten()
+#     # column_indices_flat = torch.arange(456).repeat(1, 1).flatten()
+#     top_min_values, top_indices = torch.topk(min_values_flat, n_token, largest=False)
+#     top_row_indices = min_row_indices_flat[top_indices]
+#     return list(top_row_indices.cpu().numpy())
 
-def reconstruct(distil_output, index, n_token, length, mask_pattern, model_vqvae, device):
-    confidence_based_prediction = torch.argmax(distil_output.logits, dim=2)
-    confidence_based_recons_index = index
-    for p in range(0,n_token):
-        if(mask_pattern[p]):
-            #confidence_based_recons_index[p] = confidence_based_prediction.detach().cpu().numpy()[0][p] 
-            confidence_based_recons_index[p] = confidence_based_prediction[0][p] 
+# def reconstruct(distil_output, index, n_token, length, mask_pattern, model_vqvae, device):
+#     # confidence_based_prediction = torch.argmax(distil_output.logits, dim=2)
+#     unmask_indices = []
+#     for j in range(int((mask_perc_map_indices_length[i-1]-mask_perc_map_indices_length[i])//5)):
+#         prediction_value, confidence_based_prediction = torch.max(outputs.logits, dim=2)
+#         confidence_based_recons_index = confidence_based_prediction[0] # It's like all data are already masked
+#         unmask_indices.append(torch.argmin(prediction_value).item()) # This line only returns one indice
+#         confidence_based_recons_index[unmask_indices] = index[unmask_indices]
     
-    #Reconstruct with distil predictions
-    confidence_based_recons_index = confidence_based_recons_index.to(device)
-    distil_out = model_vqvae.decode_code(torch.reshape(confidence_based_recons_index, (1,length,length)).to(device))
-    return distil_out
+#     #Reconstruct with distil predictions
+#     confidence_based_recons_index = confidence_based_recons_index.to(device)
+#     distil_out = model_vqvae.decode_code(torch.reshape(confidence_based_recons_index, (1,length,length)).to(device))
+#     return distil_out
 
 def main(args):
-    torch.cuda.set_device(1)
+    torch.cuda.set_device(0)
     torch.cuda.empty_cache()
     device = "cuda" if torch.cuda.is_available() else "cpu"
     args.distributed = dist.get_world_size() > 1
@@ -127,17 +128,26 @@ def main(args):
         q = torch.from_numpy(quantizes[x]).to(device)
         index = torch.from_numpy(indices[x]).to(device)
         q = torch.reshape(q, (1, q.size(dim=0), q.size(dim=1)))
-        
+
+        unmask_indices = []
         i = 0
-        full_indices_list = set(range(400))
-        unmask_pattern = []
+        # full_indices_list = set(range(400))
+        # unmask_pattern = []
         while i < len(mask_perc_map_indices_length):
-            q_masked, index_masked, mask_pattern = mask(q, index , n_token, unmask_pattern)                                
+            q_masked, index_masked, mask_pattern = mask(q, index , n_token, unmask_indices)                                
             q_masked = q_masked.to(device)
             index_masked = index_masked.to(device)
             with torch.no_grad():
                 outputs = model_distil(inputs_embeds = q_masked, output_hidden_states = True)
-                distil_out = reconstruct(outputs, index, n_token, length, mask_pattern, model_vqvae, device)
+                prediction_value, confidence_based_prediction = torch.max(outputs.logits, dim=2)
+                confidence_based_recons_index = confidence_based_prediction[0]
+                if unmask_indices:
+                    # print('identify unmask_indices as: ', unmask_indices)
+                    confidence_based_recons_index[unmask_indices] = index[unmask_indices]
+                
+                confidence_based_recons_index = confidence_based_recons_index.to(device)
+                distil_out = model_vqvae.decode_code(torch.reshape(confidence_based_recons_index, (1,length,length)).to(device))
+                # distil_out = reconstruct(outputs, index, n_token, length, mask_pattern, model_vqvae, device)
 
                 vqvae_out = model_vqvae.decode(torch.from_numpy(quant_b[x]).to(device)) #torch.reshape(torch.from_numpy(indices[x]), (1,length,length)).to(device)
                 index_masked_forvis = index.clone()
@@ -154,31 +164,50 @@ def main(args):
                 add_mask_img = add_mask_img.to(device)
                 add_mask_img_prob = classifier(add_mask_img)
 
-            for j in range(int((mask_perc_map_indices_length[i-1]-mask_perc_map_indices_length[i])//5)):
-                top5 = []
-                top_row_indices = extract_min_indices(distil_output=outputs, n_token=n_token)
-                for ind in top_row_indices:
-                    if ind not in unmask_pattern and len(top5)<5:
-                        top5.append(ind)
-                        unmask_pattern.append(ind)
-                if len(top5)<5:
-                    n = 5 - len(top5)
-                    randomly_selected_indices = random.sample(list(full_indices_list), n)
-                    top5.extend(randomly_selected_indices)
-                    unmask_pattern.extend(randomly_selected_indices)
-                
-                full_indices_list = full_indices_list - set(unmask_pattern)
-                q_masked, index_masked, mask_pattern = mask(q, index , n_token, top5)                                
-                q_masked = q_masked.to(device)
-                index_masked = index_masked.to(device)
-                with torch.no_grad():
-                    outputs = model_distil(inputs_embeds = q_masked, output_hidden_states = True)
-            
             recons_loss = criterion(distil_out, vqvae_out)
             reconstruction_error[x,i] = recons_loss.item()
             _, vqvae_img_label = torch.max(vqvae_img_prob, 1)
             _, add_mask_img_label = torch.max(add_mask_img_prob, 1)
             classification_acc[x,i] = (add_mask_img_label == vqvae_img_label).sum().item()
+
+            for j in range(int((mask_perc_map_indices_length[i-1]-mask_perc_map_indices_length[i])//5)):
+                # prediction_value, confidence_based_prediction = torch.max(outputs.logits, dim=2)
+                # for k in range(5):
+                top5 = []
+                while len(top5)<5:
+                    min_index = torch.argmin(prediction_value).item()
+                    # print(min_index)
+                    if min_index not in unmask_indices:
+                        unmask_indices.append(min_index)
+                        top5.append(min_index)
+                    # print(unmask_indices)
+                    # print(prediction_value[0,min_index])
+                    prediction_value[0,min_index] = prediction_value.max().item()
+                    # print(prediction_value[0,min_index])
+                q_masked, index_masked, mask_pattern = mask(q, index , n_token, unmask_indices) 
+                outputs = model_distil(inputs_embeds = q_masked, output_hidden_states = True)
+                prediction_value, confidence_based_prediction = torch.max(outputs.logits, dim=2)
+
+
+            # for j in range(int((mask_perc_map_indices_length[i-1]-mask_perc_map_indices_length[i])//5)):
+            #     top5 = []
+            #     top_row_indices = extract_min_indices(distil_output=outputs, n_token=n_token)
+            #     for ind in top_row_indices:
+            #         if ind not in unmask_pattern and len(top5)<5:
+            #             top5.append(ind)
+            #             unmask_pattern.append(ind)
+            #     if len(top5)<5:
+            #         n = 5 - len(top5)
+            #         randomly_selected_indices = random.sample(list(full_indices_list), n)
+            #         top5.extend(randomly_selected_indices)
+            #         unmask_pattern.extend(randomly_selected_indices)
+                
+            #     full_indices_list = full_indices_list - set(unmask_pattern)
+            #     q_masked, index_masked, mask_pattern = mask(q, index , n_token, top5)                                
+            #     q_masked = q_masked.to(device)
+            #     index_masked = index_masked.to(device)
+            #     with torch.no_grad():
+            #         outputs = model_distil(inputs_embeds = q_masked, output_hidden_states = True)
 
             i+=1
 
