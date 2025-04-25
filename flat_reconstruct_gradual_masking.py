@@ -75,7 +75,7 @@ def confidence_based_mask(logits,
     return masked, indices_masked, mask
 
 def main(args):
-    torch.cuda.set_device(2)
+    torch.cuda.set_device(3)
     torch.cuda.empty_cache()
     device = "cuda" if torch.cuda.is_available() else "cpu"
     args.distributed = dist.get_world_size() > 1
@@ -134,11 +134,11 @@ def main(args):
     mask_percentages = np.append(mask_percentages,[.85,.95])
     mask_percentages = np.sort(mask_percentages)
 
-    reconstruction_errors = []
     average_errors = []
-    cross_entropy_class_err = []
 
     for perc in mask_percentages:
+        reconstruction_errors = []
+        cross_entropy_class_err = []
 
         criterion = nn.MSELoss()
         criterion_class = nn.CrossEntropyLoss()
@@ -201,9 +201,7 @@ def main(args):
                 print(tot_sample)
 
 
-                vqvae_masked_out = vqvae_masked_out.unsqueeze(0)
                 if x%5 ==0:
-                    vqvae_masked_out = vqvae_masked_out.unsqueeze(0)
                     utils.save_image(
                         torch.cat([vqvae_out, vqvae_masked_out, distil_out], 0).to(device),
                         f"image/recons/gradual/80x80_grad_{vqvae_img_label.item()}_{grad_mask_img_label.item()}_{int(perc*100)}_{str(x).zfill(5)}.png",
