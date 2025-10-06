@@ -27,14 +27,42 @@ Implementation Pipeline/Stages:
             - Retrain the model on the train + validation sets (optional but recommended)
             - Evaluate final performance on the test set
             - Report metrics: total loss, reconstruction loss, and optionally visual samples
-        10. Practical Tips:
+        5. Practical Tips:
             - Loss Curves: Plot training and validation loss over epochs to diagnose underfitting or overfitting.
             - Model Checkpointing: Save the model with the lowest validation loss during training.
             - Seed Control: Set random seeds for reproducibility.
             - Normalization: Normalize input data consistently across all splits.
             - Use MLflow or Neptune to track the errors
+    🚀 Running Instructions
+        ✅ Use full config:
+            bash
+            torchrun --nproc_per_node=4 train.py --config config.yaml
+        ✅ Override GPU selection:
+            bash
+            torchrun --nproc_per_node=4 train.py --config config.yaml --gpu_ids 1 3
+        ✅ Filter by threshold:
+            bash
+            torchrun --nproc_per_node=4 train.py --config config.yaml --threshold 5.0 --filter_by_threshold
+        ✅ Combine both:
+            bash
+            torchrun --nproc_per_node=4 train.py --config config.yaml --gpu_ids 1 3 --threshold 5.0 --filter_by_threshold
+        ✅ Automatically detect available gpus below specific threshold
+            torchrun --nproc_per_node=$(python -c "import yaml; cfg=yaml.safe_load(open('config.yaml')); from gpu_utils import select_gpus; print(len(select_gpus(cfg['multiprocessing']['gpu'])[0]))") train_vqvae.py --config config.yaml
+
+
+*Current Issues:
+1. model has no train method
+2. incorporate best params
+3. Is it possible for our data and hardware to run the study through optuna since it seems 
+'''
+I know it will split the dataset to num_gpus chunks and each chunk will go to one of the gpus. Is it randomly sampled or sequentially?
+I understand that the distributed sampler chunks the dataset for each GPU. However, when using DDP, it loads the entire Dataset on N GPUs N times. Is this how it works?
+https://discuss.pytorch.org/t/distributedsampler/90205/3
+custom running limit gpu_ids, threshold etc.
+'''
+
 - Apply trained VQ-VAE model (**vqvae_reconstruction.py**): To reconstruct images and determine the codebook (embedding space) and indices (latent space) for each image. The trained model is selected from the best model from the previous step
-- Train a classifier (train_classifier.py): Define the classifier, determine best parameters, and then log all by MLflow, evaluate them on test and select the top one
+- Train a classifier (**train_classifier.py**): Define the classifier, determine best parameters, and then log all by MLflow, evaluate them on test and select the top one
 - Train LLM model, distilbert, (train_distil.py)
 
 Masking Definition:
