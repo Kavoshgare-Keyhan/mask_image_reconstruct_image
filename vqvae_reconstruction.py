@@ -124,19 +124,19 @@ def main():
                 class_folder = os.path.join(path_cfg['recnstructed_imge'], str(label.item()))
                 os.makedirs(class_folder, exist_ok=True)
                 save_file = os.path.join(class_folder, f"{label.item()}_{j * test_loader.batch_size + idx + 1:05d}.png")
-                Image.fromarray(out).save(save_file) 
+                Image.fromarray(out.cpu().numpy()).save(save_file) 
 
     # Concatenate all indices into a single tensor and save it
     indices_tensor = torch.cat(indices, dim=0)
     quantizes_tensor = torch.cat(quantizes, dim=0)
     labels = np.array(labels)
 
-    indices_path = os.path.join(args.save_path_models, f"latent_space_vqvae_80x80_codebook_144x456.npy")
-    quantized_path = os.path.join(args.save_path_models, f"codebook_vqvae_80x80_codebook_144x456.npy")
-    np.save(os.path.join(args.save_path_models, f'labels.npy'), labels)
+    indices_path = os.path.join(model_path, f"latent_space_vqvae_80x80_codebook_144x456.npy")
+    quantized_path = os.path.join(model_path, f"codebook_vqvae_80x80_codebook_144x456.npy")
 
     np.save(indices_path, indices_tensor.numpy())
     np.save(quantized_path, quantizes_tensor.numpy())
+    np.save(os.path.join(model_path, f'labels.npy'), labels)
 
     test_loss /= len(test_loader.dataset)
     print(f"✅ Final Test Loss: {test_loss:.4f}")
