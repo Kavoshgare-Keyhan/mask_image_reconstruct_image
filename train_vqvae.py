@@ -1,168 +1,176 @@
-import argparse, sys, os, torch
+import os, yaml, argparse, json, torch, mlflow
 from torch import nn, optim
-from torch.utils.data import DataLoader
-from torchvision import datasets, transforms, utils 
-from torchvision.datasets import ImageNet
-from tqdm import tqdm
+from torch.nn.parallel import DistributedDataParallel as DDP
 from vqvae import FlatVQVAE
-# from scheduler import CycleScheduler
-import distributed as dist
-from torchsummary import summary
-from torch.utils.tensorboard import SummaryWriter
-import neptune.new as neptune
-from torch.optim.lr_scheduler import CyclicLR
+from data_utils import CustomImageNetDataV2, CustomLoader
+from gpu_utils import select_gpus
+import torch.distributed as dist
 
+# ---------- Prioritize Task -----------
+os.nice(19)
 
-os. nice (19)
+# ---------- Config & CLI ----------
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--config', type=str, default='config.yaml')
+    return parser.parse_args()
 
-run = neptune.init_run(
-    project="tns/Vqvae-transformer",
-    api_token="eyJhcGlfYWRkcmVzcyI6Imh0dHBzOi8vYXBwLm5lcHR1bmUuYWkiLCJhcGlfdXJsIjoiaHR0cHM6Ly9hcHAubmVwdHVuZS5haSIsImFwaV9rZXkiOiIwODg4OTU0Yy0xODAyLTRiM2QtYjYzYi0xMWQxYThmYWJlOWQifQ==",
-    capture_stdout=False,
-    capture_stderr=False,
-)
+def load_config(path):
+    with open(path, 'r') as f:
+        return yaml.safe_load(f)
 
-def train(epoch, loader, model, optimizer, scheduler, device):
-    if dist.is_primary():
-        loader = tqdm(loader)
+# ---------- Distributed Setup ----------
+def setup_distributed():
+    rank = int(os.environ['RANK'])
+    world_size = int(os.environ['WORLD_SIZE'])
+    local_rank = int(os.environ['LOCAL_RANK'])
+    torch.cuda.set_device(local_rank)
+    dist.init_process_group(backend='nccl', rank=rank, world_size=world_size)
+    return rank, world_size, local_rank
 
-    criterion = nn.MSELoss()
+# ---------- Loader ----------
+def get_loader(dataset, batch_size, shuffle, distributed, world_size=None, rank=None):
+    return CustomLoader(dataset, batch_size=batch_size, shuffle=shuffle,
+                        distributed=distributed, world_size=world_size, rank=rank).data_loader
 
-    latent_loss_weight = 0.35
-    diversity_loss_weight = 0.0001
-    sample_size = 5
+# ---------- Load Best Params ----------
+def load_best_params(model_path):
+    for fname in os.listdir(model_path):
+        if fname.startswith("best_vqvae_params_trial_") and fname.endswith(".json"):
+            with open(os.path.join(model_path, fname), 'r') as f:
+                return json.load(f)
+    return None
 
-    mse_sum = 0
-    mse_n = 0
-    for i, (img, label) in enumerate(loader):
-        model.zero_grad()
+# ---------- Load Best Model ----------
+def load_best_model_path(model_path):
+    for fname in os.listdir(model_path):
+        if fname.startswith("best_vqvae_model_trial_") and fname.endswith(".pth"):
+            return os.path.join(model_path, fname)
+    return None
 
-        img = img.to(device)
-        out, latent_loss, diversity_loss, codebook_usage = model(img)
-        recon_loss = criterion(out, img)
-        latent_loss = latent_loss.mean()
-        loss = recon_loss + latent_loss_weight * latent_loss + diversity_loss_weight * diversity_loss
-        loss.backward()
+# ---------- Main ----------
+def main():
+    args = parse_args()
+    config = load_config(args.config)
+    selected_gpu_ids, world_size = select_gpus(config['multiprocessing']['gpu'])
+    rank, _, local_rank = setup_distributed()
+    device = torch.device(f"cuda:{selected_gpu_ids[local_rank]}")
 
-        if scheduler is not None:
-            scheduler.step()
-        optimizer.step()
+    # Load datasets
+    path_cfg = config['path']
+    train_set = CustomImageNetDataV2(image_dir=path_cfg['image_net_train'], image_type='original', folder_label='int_id')
+    val_set = CustomImageNetDataV2(image_dir=path_cfg['image_net_val'], image_type='original', folder_label='int_id')
+    test_set = CustomImageNetDataV2(image_dir=path_cfg['image_net_test'], image_type='original', folder_label='int_id')
 
-        part_mse_sum = recon_loss.item() * img.shape[0]
-        part_mse_n = img.shape[0]
-        comm = {"mse_sum": part_mse_sum, "mse_n": part_mse_n}
-        comm = dist.all_gather(comm)
+    model_path = path_cfg['vqvae_model']
+    os.makedirs(model_path, exist_ok=True)
 
-        for part in comm:
-            mse_sum += part["mse_sum"]
-            mse_n += part["mse_n"]
+    # Load best parameters
+    best_params = load_best_params(model_path)
+    if best_params is None:
+        print("⚠️ No best params found. Using defaults from config.")
+        best_params = config['params']['vqvae']
 
-        if dist.is_primary():
-            lr = optimizer.param_groups[0]["lr"]
+    # Extract hyperparameters
+    batch_size = best_params['batch_size']
+    latent_loss_weight = best_params['latent_loss_weight']
+    diversity_loss_weight = best_params['diversity_loss_weight']
+    num_epochs = best_params['num_epochs']
+    lr = best_params['lr']
+    weight_decay = best_params['weight_decay']
 
-            loader.set_description(
-                (
-                    f"epoch: {epoch + 1}; mse: {recon_loss.item():.5f}; "
-                    f"latent: {latent_loss.item():.3f}; avg mse: {mse_sum / mse_n:.5f}; "
-                    f"lr: {lr:.5f}"
-                )
-            )
-            run["train/mse"].log(recon_loss.item())
-            run["train/latent"].log(latent_loss.item())
-            run["train/epoch"].log(epoch + 1)
-            run["train/num_used_codebooks"].log(codebook_usage)
-            
+    # Train on train+val
+    full_set = torch.utils.data.ConcatDataset([train_set, val_set])
+    full_loader = get_loader(full_set, batch_size=batch_size, shuffle=True, distributed=dist.is_initialized(), world_size=world_size, rank=rank)
+    train_loader = get_loader(train_set, batch_size=batch_size, shuffle=True, distributed=dist.is_initialized(), world_size=world_size, rank=rank)
+    val_loader = get_loader(val_set, batch_size=batch_size, shuffle=True, distributed=dist.is_initialized(), world_size=world_size, rank=rank)
 
-            if i % 9000 == 0:
-                model.eval()
-                sample = img[:sample_size]
-                with torch.no_grad():
-                    out, _ ,_,_= model(sample)
-                utils.save_image(
-                    torch.cat([sample, out], 0),
-                    f"image/sample/flat_vqvae_80x80codebook_{str(epoch + 1).zfill(5)}_{str(i).zfill(5)}.png",
-                    nrow=sample_size,
-                    normalize=True,
-                    range=(-1, 1),
-                )
-                model.train()
-
-def main(args):
-    torch.cuda.set_device(3)  # Use GPU 1 (if desired)
-    torch.cuda.empty_cache()
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    args.distributed = dist.get_world_size() > 1
-
-    transform = transforms.Compose(
-        [
-            transforms.Resize((80,80)),
-            transforms.ToTensor(),
-            transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
-        ]
-    )
-
-    dataset = datasets.ImageFolder("/local/reyhasjb/datasets/Imagenet-100class/train",transform=transform)
-    data_loader = DataLoader(dataset, batch_size=256 // args.n_gpu, shuffle=True, num_workers=12)
-    print(len(dataset))
-    print(len(dataset.classes))
-    print(len(dataset[0]))
-    print(dataset[0][0].shape)
-
+    # Load best model checkpoint
+    model_ckpt = load_best_model_path(model_path)
     model = FlatVQVAE().to(device)
+    if dist.is_initialized():
+        model = DDP(model, device_ids=[device.index])
+    if model_ckpt:
+        model.load_state_dict(torch.load(model_ckpt))
 
+    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+    recon_criterion = nn.MSELoss()
 
-    if args.distributed:
-        model = nn.parallel.DistributedDataParallel(
-            model,
-            device_ids=[dist.get_local_rank()],
-            output_device=dist.get_local_rank(),
-        )
+    # ---------- MLflow Logging ----------
+    if rank == 0:
+        mlflow.start_run(run_name="vqvae_final_training")
+        mlflow.log_params({
+            "batch_size": batch_size,
+            "latent_loss_weight": latent_loss_weight,
+            "diversity_loss_weight": diversity_loss_weight,
+            "num_epochs": num_epochs,
+            "lr": lr,
+            "weight_decay": weight_decay
+        })
 
-    optimizer = optim.Adam(model.parameters(), lr=args.lr)
-    run["train/lr"].log(args.lr)
-    scheduler = None
-    if args.sched == "cycle":
-        scheduler = CyclicLR(
-        optimizer, 
-        base_lr=args.lr * 0.1, 
-        max_lr=args.lr, 
-        step_size_up=len(loader) * args.epoch * 0.05, 
-        mode="triangular",
-        cycle_momentum=False)
-    x=0
-    for i in range(args.epoch):
-        train(i, data_loader, model, optimizer, scheduler, device)
-        x=i
-        if dist.is_primary():
-            model_path = os.path.join(args.save_path_models, f"model_epoch{i+1}_flat_vqvae80x80_144x456codebook.pth")
-            torch.save(model.state_dict(), model_path)
+    model.train()
+    if model_ckpt:
+        for epoch in range(num_epochs):
+            train_loss = 0.0
+            for inputs, _ in full_loader:
+                inputs = inputs.to(device)
+                optimizer.zero_grad()
+                recon, latent_loss, diversity_loss, _ = model(inputs)
+                recon_loss = recon_criterion(recon, inputs)
+                loss = recon_loss + latent_loss_weight * latent_loss + diversity_loss_weight * diversity_loss
+                loss.backward()
+                optimizer.step()
+                train_loss += loss.item() * inputs.size(0)
 
-        
-    
+            train_loss /= len(full_loader.dataset)
+            if rank == 0:
+                mlflow.log_metric("train_loss", train_loss, step=epoch)
+                print(f"[Epoch {epoch+1}] Train Loss: {train_loss:.4f}")
+            save_path_model = os.path.join(model_path, f"model_epoch_{epoch}_vqvae_80x80_codebook_144x456.pth")
+            torch.save(model.state_dict(), save_path_model)
+    else:
+        least_val_loss = float('inf')
+        for epoch in range(num_epochs):
+            train_loss = 0.0
+            for inputs, _ in train_loader:
+                inputs = inputs.to(device)
+                optimizer.zero_grad()
+                recon, latent_loss, diversity_loss, _ = model(inputs)
+                recon_loss = recon_criterion(recon, inputs)
+                loss = recon_loss + latent_loss_weight * latent_loss + diversity_loss_weight * diversity_loss
+                loss.backward()
+                optimizer.step()
+                train_loss += loss.item() * inputs.size(0)
+
+            train_loss /= len(train_loader.dataset)
+
+            model.eval()
+            val_loss = 0.0
+            with torch.no_grad():
+                for inputs, _ in val_loader:
+                    inputs = inputs.to(device)
+                    recon, latent_loss, diversity_loss, _ = model(inputs)
+                    recon_loss = recon_criterion(recon, inputs)
+                    loss = recon_loss + latent_loss_weight * latent_loss + diversity_loss_weight * diversity_loss
+                    val_loss += loss.item() * inputs.size(0)
+
+            val_loss /= len(val_loader.dataset)
+            if rank == 0:
+                mlflow.log_metric("train_loss", train_loss, step=epoch)
+                mlflow.log_metric("val_loss", val_loss, step=epoch)
+                print(f"[Epoch {epoch+1}] Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
+
+            if val_loss < least_val_loss:
+                least_val_loss = val_loss
+            else:
+                print(f'Least Validation Loss is {least_val_loss: .4f} and belongs to epoch {epoch}')
+                save_path_model = os.path.join(model_path, f"model_epoch_{epoch}_vqvae_80x80_codebook_144x456.pth")
+                torch.save(model.state_dict(), save_path_model)
+                if rank == 0:
+                    mlflow.log_artifact(save_path_model)
+
+    if rank == 0:
+        mlflow.end_run()
 
 if __name__ == "__main__":
-    
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--n_gpu", type=int, default=1)
-
-    port = (
-        2 ** 15
-        + 2 ** 14
-        + hash(os.getuid() if sys.platform != "win32" else 1) % 2 ** 14
-    )
-    parser.add_argument("--dist_url", default=f"tcp://127.0.0.1:{port}")
-    parser.add_argument("--save_path_models", default="/home/abghamtm/work/masking_comparison/checkpoint/vqvae/")
-    parser.add_argument("--save_path_imgs", default="/home/abghamtm/work/masking_comparison/image/100class-vqvae-reconstruction/")
-    parser.add_argument("--size", type=int, default=80)
-    parser.add_argument("--epoch", type=int, default=100)
-    parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--sched", type=str)
-    # parser.add_argument('--ckpt_vqvae', type=str, default="checkpoint/flat_vqvae_80x80_144x456codebook_100class_051.pt")
-
-    # parser.add_argument("path", type=str)
-
-    args = parser.parse_args()
-
-    print(args)
-
-    dist.launch(main, args.n_gpu, 1, 0, args.dist_url, args=(args,))
+    main()
