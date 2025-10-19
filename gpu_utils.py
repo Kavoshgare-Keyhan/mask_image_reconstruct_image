@@ -16,7 +16,7 @@ def select_gpus(config):
 
     selected = list(usage.keys())
 
-    if config.get("filter_by_threshold", False) and config.get("threshold") is not None:
+    if config.get("filter_by_threshold", True) and config.get("threshold") is not None:
         selected = [i for i in selected if usage[i] < config["threshold"]]
 
     if config.get("gpu_ids") is not None:
