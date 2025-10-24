@@ -1,176 +1,147 @@
-import argparse, random, sys, os, torch, json, urllib.request
-from torch import nn
-from torch.utils.data import Dataset, DataLoader, Subset
-from torchvision import datasets, transforms, utils 
-
+import os, yaml, argparse, json, torch, mlflow
+from torch import nn, optim
+from torch.nn.parallel import DistributedDataParallel as DDP
+from vqvae import FlatVQVAE
+from data_utils import CustomImageNetDataV2, CustomLoader
+from gpu_utils import select_gpus
+import torch.distributed as dist
 import numpy as np
+from PIL import Image
 from tqdm import tqdm
 
-from vqvae import FlatVQVAE
-# from scheduler import CycleScheduler
-import distributed as dist
-import neptune.new as neptune
+# ---------- Prioritize Task -----------
+os.nice(19)
 
-os. nice (19)
-
-def rand_img_selection(dataset, images_per_class=100, seed=42):
-    '''
-    Randomly select fixed number of images from each folder (classes)
-    '''
-    # Fix the random seed for reproducability
-    random.seed(seed)
-
-    class_indices = {class_name: [] for class_name in dataset.class_to_idx}
-    for idx, (_, label) in enumerate(dataset.samples):
-        class_name = dataset.classes[label]
-        class_indices[class_name].append(idx)
-
-    selected_indices = []
-    for class_name, indices in class_indices.items():
-        selected_indices.extend(random.sample(indices, min(images_per_class, len(indices))))
-
-    subset = Subset(dataset, selected_indices)
-
-    # Assign the same attributes as the original dataset
-    subset.classes = dataset.classes
-    subset.class_to_idx = dataset.class_to_idx
-
-    return subset
-
-class CustomImageDataset(Dataset):
-    def __init__(self, subset):
-        self.subset = subset
-        self.classes = subset.classes  # Keep mapped class names
-        self.class_to_idx = subset.class_to_idx  # Keep class-to-index mapping
-        # self.idx_to_class = {v: k for k, v in self.class_to_idx.items()}  # Reverse mapping
-
-    def __len__(self):
-        return len(self.subset)
-
-    def __getitem__(self, idx):
-        img, label = self.subset[idx]  # Get image and numerical label
-        class_name = self.classes[label]  # Convert label to class name
-        class_label = self.class_to_idx[class_name] # Convert
-        return img, class_label
-
-def main(args):
-    torch.cuda.set_device(3)  # Use GPU 1 (if desired)
-    torch.cuda.empty_cache()
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    args.distributed = dist.get_world_size() > 1
-
-    transform = transforms.Compose(
-        [
-            transforms.Resize((80,80)),
-            transforms.ToTensor(),
-            transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
-        ]
-    )
-
-    dataset = datasets.ImageFolder("/local/reyhasjb/datasets/Imagenet-100class/train",transform=transform)
-
-    # Change wnid folder name to corresponding indices and names
-    ## Call essential library to map indices to proper names and wnid
-    class_index_url = "https://s3.amazonaws.com/deep-learning-models/image-models/imagenet_class_index.json"
-    with urllib.request.urlopen(class_index_url) as url:
-        class_idx = json.loads(url.read().decode())
-    idx_to_class = {int(key): value[1] for key, value in class_idx.items()}
-    wnid_to_idx = {value[0]: int(key) for key, value in class_idx.items()}
-
-    ## Correct classes and class_to_idx attribute and replace wnid constituting classes and key in class_to_idx with true class names and values of class_to_idx which automatically sets from 0 to 99 to true labels
-    dataset_class_to_idx = {wnid: wnid_to_idx[wnid] for wnid in dataset.classes if wnid in wnid_to_idx}
-    dataset.class_to_idx = dataset_class_to_idx
-    for i, cls in enumerate(dataset.classes):
-        dataset.classes[i] = idx_to_class[dataset.class_to_idx[cls]]
-        class_to_idx = {class_idx[str(value)][1]: value for value in dataset.class_to_idx.values()}
-    dataset.class_to_idx = class_to_idx
-
-    # Select a sample from all images
-    selected_dataset = rand_img_selection(dataset)
-    # Change the label to true indices by a custom dataset
-    wrapped_dataset = CustomImageDataset(selected_dataset)
-    data_loader = DataLoader(wrapped_dataset, batch_size=256 // args.n_gpu, shuffle=True, num_workers=12)
-
-
-    model_vqvae = FlatVQVAE().to(device)
-    model_vqvae.load_state_dict(torch.load(args.ckpt_vqvae, map_location=device))
-    model_vqvae = model_vqvae.to(device)
-    model_vqvae.eval()
-    epoch = args.epoch
-
-    if args.distributed:
-        model_vqvae = nn.parallel.DistributedDataParallel(
-            model_vqvae,
-            device_ids=[dist.get_local_rank()],
-            output_device=dist.get_local_rank(),
-        )
-
-    # Save the final model
-    os.makedirs(args.save_path_models, exist_ok=True)
-    if dist.is_primary():
-        model_vqvae.eval()
-        all_indices = []
-        all_quantizes = []
-        all_labels = []
-        with torch.no_grad():
-            for j, (images, labels) in tqdm(enumerate(data_loader), desc='Recall trained model to save codebook indices', leave=False): # Ignore the label in DataLoader
-                images = images.float().to(device)
-                quant_b, _, id_b, _, _ = model_vqvae.encode(images)
-                outputs = model_vqvae.decode(quant_b)
-                for idx, (label, out) in enumerate(zip(labels, outputs)):
-                    print(label)
-                    # class_name = selected_dataset.classes[labels[idx].item()]
-                    class_folder = os.path.join(args.save_path_imgs, str(label.item()))
-                    os.makedirs(class_folder, exist_ok=True)
-
-                    save_file = os.path.join(class_folder, f"reconstructed_{label.item()}_{j * data_loader.batch_size + idx + 1:05d}.png")
-                    utils.save_image(
-                        torch.cat([out.unsqueeze(0)], 0),
-                        save_file,
-                        nrow=2,
-                        normalize=True,
-                        range=(-1, 1),
-                    )
-
-                all_indices.append(id_b.cpu())
-                all_quantizes.append(quant_b.cpu())
-                all_labels.extend(labels.cpu().numpy())
-                
-
-        # Concatenate all indices into a single tensor and save it
-        indices_tensor = torch.cat(all_indices, dim=0)
-        quantizes_tensor = torch.cat(all_quantizes, dim=0)
-        all_labels = np.array(all_labels)
-
-        indices_path = os.path.join(args.save_path_models, f"indices_epoch{epoch}_flat_vqvae80x80_144x456codebook.npy")
-        quantized_path = os.path.join(args.save_path_models, f"quantized_epoch{epoch}_flat_vqvae80x80_144x456codebook.npy")
-        np.save(os.path.join(args.save_path_models, f'labels_epoch{epoch}_flat_vqvae80x80_144x456codebook.npy'), all_labels)
-
-        np.save(indices_path, indices_tensor.numpy())
-        np.save(quantized_path, quantizes_tensor.numpy())
-
-if __name__ == "__main__":
+# ---------- Config & CLI ----------
+def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--n_gpu", type=int, default=1)
+    parser.add_argument('--config', type=str, default='config.yaml')
+    return parser.parse_args()
 
-    port = (
-        2 ** 15
-        + 2 ** 14
-        + hash(os.getuid() if sys.platform != "win32" else 1) % 2 ** 14
-    )
-    parser.add_argument("--dist_url", default=f"tcp://127.0.0.1:{port}")
-    parser.add_argument("--save_path_models", default="/home/abghamtm/work/masking_comparison/checkpoint/vqvae/")
-    parser.add_argument("--save_path_imgs", default="/home/abghamtm/work/masking_comparison/image/100class-vqvae-reconstruction/")
-    parser.add_argument("--size", type=int, default=80)
-    parser.add_argument("--epoch", type=int, default=80)
-    parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--sched", type=str)
-    parser.add_argument('--ckpt_vqvae', type=str, default="/home/abghamtm/work/masking_comparison/checkpoint/vqvae/model_epoch80_flat_vqvae80x80_144x456codebook.pth")
+def load_config(path):
+    with open(path, 'r') as f:
+        return yaml.safe_load(f)
 
-    # parser.add_argument("path", type=str)
+# ---------- Distributed Setup ----------
+def setup_distributed():
+    rank = int(os.environ['RANK'])
+    world_size = int(os.environ['WORLD_SIZE'])
+    local_rank = int(os.environ['LOCAL_RANK'])
+    torch.cuda.set_device(local_rank)
+    dist.init_process_group(backend='nccl', rank=rank, world_size=world_size)
+    return rank, world_size, local_rank
 
-    args = parser.parse_args()
+# ---------- Loader ----------
+def get_loader(dataset, batch_size, shuffle, distributed, world_size=None, rank=None):
+    return CustomLoader(dataset, batch_size=batch_size, shuffle=shuffle,
+                        distributed=distributed, world_size=world_size, rank=rank).data_loader
 
-    print(args)
+# ---------- Load Best Params ----------
+def load_best_params(model_path):
+    for fname in os.listdir(model_path):
+        if fname.startswith("best_vqvae_params_trial_") and fname.endswith(".json"):
+            with open(os.path.join(model_path, fname), 'r') as f:
+                return json.load(f)
+    return None
 
-    dist.launch(main, args.n_gpu, 1, 0, args.dist_url, args=(args,))
+# ---------- Load Best Model ----------
+def load_best_model_path(model_path, epoch):
+    return os.path.join(model_path, f"model_epoch_{epoch}_vqvae_80x80_codebook_144x456.pth")
+
+# ---------- Main ----------
+def main():
+    args = parse_args()
+    config = load_config(args.config)
+    selected_gpu_ids, world_size = select_gpus(config['multiprocessing']['gpu'])
+    rank, _, local_rank = setup_distributed()
+    device = torch.device(f"cuda:{selected_gpu_ids[local_rank]}")
+
+    # Load datasets
+    path_cfg = config['path']
+    test_set = CustomImageNetDataV2(image_dir=path_cfg['image_net_test'], image_type='original', folder_label='int_id')
+
+    model_path = path_cfg['vqvae_model']
+    os.makedirs(model_path, exist_ok=True)
+
+    # Load best parameters
+    best_params = load_best_params(model_path)
+    if best_params is None:
+        print("⚠️ No best params found. Using defaults from config.")
+        best_params = config['params']['vqvae']
+
+    # Extract hyperparameters
+    batch_size = best_params['batch_size']
+    latent_loss_weight = best_params['latent_loss_weight']
+    diversity_loss_weight = best_params['diversity_loss_weight']
+    num_epochs = best_params['num_epochs']
+    lr = best_params['lr']
+    weight_decay = best_params['weight_decay']
+
+     # Load best model checkpoint
+    model_ckpt = load_best_model_path(model_path, epoch = num_epochs)
+    model = FlatVQVAE().to(device)
+    if dist.is_initialized():
+        model = DDP(model, device_ids=[device.index])
+    model.load_state_dict(torch.load(model_ckpt))
+    recon_criterion = nn.MSELoss()
+
+    # ---------- MLflow Logging ----------
+    if rank == 0:
+        mlflow.start_run(run_name="vqvae_test_and_reconstructing")
+        mlflow.log_params({
+            "batch_size": batch_size,
+            "latent_loss_weight": latent_loss_weight,
+            "diversity_loss_weight": diversity_loss_weight,
+            "num_epochs": num_epochs,
+            "lr": lr,
+            "weight_decay": weight_decay
+        })
+
+    # ---------- Test Evaluation ----------
+    test_loader = get_loader(test_set, batch_size=batch_size, shuffle=False, distributed=False)
+    model.eval()
+    indices = [] # indices of all images - latent space
+    quantizes = [] # codebooks of all images
+    labels = [] # labels of all images
+    test_loss = 0.0
+    with torch.no_grad():
+        for j, (inputs, labels) in tqdm(enumerate(test_loader)):
+            inputs = inputs.to(device)
+            recon, latent_loss, diversity_loss, _ = model(inputs)
+            recon_loss = recon_criterion(recon, inputs)
+            loss = recon_loss + latent_loss_weight * latent_loss + diversity_loss_weight * diversity_loss
+            test_loss += loss.item() * inputs.size(0)
+
+            ## ----------- store codebook, latent space, and corresponding labels -------------
+            quant_b, _, id_b, _, _ = model.encode(inputs)
+            outputs = model.decode(quant_b)
+            indices.append(id_b.cpu())
+            quantizes.append(quant_b.cpu())
+            labels.extend(labels.cpu().numpy())
+            ### ---------- save reconstructed images ----------------
+            for idx, (label, out) in enumerate(zip(labels, outputs)):
+                print(label)
+                class_folder = os.path.join(path_cfg['recnstructed_imge'], str(label.item()))
+                os.makedirs(class_folder, exist_ok=True)
+                save_file = os.path.join(class_folder, f"{label.item()}_{j * test_loader.batch_size + idx + 1:05d}.png")
+                Image.fromarray(out.cpu().numpy()).save(save_file) 
+
+    # Concatenate all indices into a single tensor and save it
+    indices_tensor = torch.cat(indices, dim=0)
+    quantizes_tensor = torch.cat(quantizes, dim=0)
+    labels = np.array(labels)
+
+    indices_path = os.path.join(model_path, f"latent_space_vqvae_80x80_codebook_144x456.npy")
+    quantized_path = os.path.join(model_path, f"codebook_vqvae_80x80_codebook_144x456.npy")
+
+    np.save(indices_path, indices_tensor.numpy())
+    np.save(quantized_path, quantizes_tensor.numpy())
+    np.save(os.path.join(model_path, f'labels.npy'), labels)
+
+    test_loss /= len(test_loader.dataset)
+    print(f"✅ Final Test Loss: {test_loss:.4f}")
+    if rank == 0:
+        mlflow.log_metric("test_loss", test_loss)
+        mlflow.end_run()
+
+

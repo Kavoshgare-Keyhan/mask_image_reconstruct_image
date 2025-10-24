@@ -1,149 +1,231 @@
-import torch, os, argparse
+# 📦 Imports
+import os
+import torch
 import torch.nn as nn
-from torchvision.models import resnet50, ResNet50_Weights
-from torchvision import datasets, transforms
-from torch.utils.data import DataLoader, Dataset, Subset
-from sklearn.model_selection import train_test_split
-from tqdm import tqdm
 import torch.optim as optim
-import numpy as np
-from vqvae import FlatVQVAE
-import distributed as dist
+from torchvision import datasets, transforms, models
+from torch.utils.data import DataLoader, ConcatDataset
+from sklearn.metrics import accuracy_score, confusion_matrix, ConfusionMatrixDisplay
+import matplotlib.pyplot as plt
+import optuna
+import mlflow
+import mlflow.pytorch
 
-# Check GPU availability
-print(torch.cuda.is_available())
-print(torch.cuda.device_count())
-print(torch.cuda.current_device())
-print(torch.cuda.get_device_name(torch.cuda.current_device()))
+# 🖥️ Use CUDA if available
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
 
-# Initialize CUDA
-torch.cuda.init()
+# 📁 Dataset paths
+data_dir = "path/to/your/dataset"  # Must contain train/, val/, test/
+num_classes = 1000  # Adjust based on your dataset
 
-class ReconstructedDataset(Dataset):
-    def __init__(self, images, labels):
-        self.images = images
-        self.labels = labels
+# 🧪 Data transforms
+transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.RandomHorizontalFlip(),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                         std=[0.229, 0.224, 0.225])
+])
 
-    def __len__(self):
-        return len(self.labels)
+# 📂 Load datasets
+train_set = datasets.ImageFolder(os.path.join(data_dir, "train"), transform=transform)
+val_set = datasets.ImageFolder(os.path.join(data_dir, "val"), transform=transform)
+test_set = datasets.ImageFolder(os.path.join(data_dir, "test"), transform=transform)
 
-    def __getitem__(self, idx):
-        image = self.images[idx]
-        label = self.labels[idx]
-        return image, label
+# Add Global Tracker
+best_model_acc = 0.0
+best_model_state = None
 
-def decode_quantizes(model, quantizes):
-    quantizes = torch.tensor(quantizes).float().to(device)
-    with torch.no_grad():
-        images = model.decode(quantizes)
-    return images
+# 🧠 Optuna objective function
+def objective(trial):
+    # 🔧 Suggest hyperparameters
+    lr = trial.suggest_loguniform('lr', 1e-5, 1e-3)
+    weight_decay = trial.suggest_loguniform('weight_decay', 1e-6, 1e-2)
+    batch_size = trial.suggest_categorical('batch_size', [32, 64, 128])
+    num_epochs = trial.suggest_int('num_epochs', 5, 15)
 
-ckpt_vqvae = "/home/abghamtm/work/masking_comparison/checkpoint/vqvae/model_epoch80_flat_vqvae80x80_144x456codebook.pth"
-torch.cuda.set_device(1) 
-torch.cuda.empty_cache()
-device = "cuda" if torch.cuda.is_available() else "cpu"
+    # 🔄 Data loaders
+    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_set, batch_size=batch_size, shuffle=False)
 
-quantizes = np.load('/home/abghamtm/work/masking_comparison/checkpoint/vqvae/quantized_epoch80_flat_vqvae80x80_144x456codebook.npy')
-labels = np.load('/home/abghamtm/work/masking_comparison/checkpoint/vqvae/labels_epoch80_flat_vqvae80x80_144x456codebook.npy')
-labels = torch.from_numpy(labels)
+    # 🧠 Load and modify pretrained ResNet50
+    model = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V2)
+    model.fc = nn.Linear(model.fc.in_features, num_classes)
+    model.to(device)
 
-model_vqvae = FlatVQVAE().to(device)
-model_vqvae.load_state_dict(torch.load(ckpt_vqvae, map_location=device))
-model_vqvae = model_vqvae.to(device)
-model_vqvae.eval()
-reconstructed_images = decode_quantizes(model_vqvae, quantizes)
+    # ⚙️ Loss and optimizer
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=3)
 
-dataset = ReconstructedDataset(reconstructed_images, labels)
+    # 📁 MLflow tracking
+    mlflow.start_run(run_name=f"Optuna_Trial_{trial.number}")
+    mlflow.log_params({
+        "lr": lr,
+        "weight_decay": weight_decay,
+        "batch_size": batch_size,
+        "num_epochs": num_epochs
+    })
 
-# Split the indices in a stratified manner
-train_indices, test_indices = train_test_split(
-    np.arange(len(labels)),
-    test_size=0.2,
-    stratify=labels,
-    random_state=42
-)
-# Create subsets of the dataset
-train_dataset = Subset(dataset, train_indices)
-test_dataset = Subset(dataset, test_indices)
-
-train_loader = DataLoader(train_dataset, batch_size=256, shuffle=True, num_workers=0)
-for inputs, labels in train_loader:
-    print(inputs.shape, labels.shape)
-    break
-
-test_loader = DataLoader(test_dataset, batch_size=256, shuffle=True, num_workers=0)
-
-weights = ResNet50_Weights.IMAGENET1K_V2
-preprocess = weights.transforms()
-model = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)
-model.to(device)
-
-# Define loss function and optimizer
-criterion = nn.CrossEntropyLoss()
-optimizer = optim.SGD(model.parameters(), lr=0.001, momentum=0.9)
-
-# Training loop
-num_epochs = 30  # Adjust as needed
-
-for epoch in range(num_epochs):
-    model.train()
-    running_loss = 0.0
-    correct = 0
-    total = 0
-    for inputs, labels in tqdm(train_loader):
-        inputs = preprocess(inputs)
-        inputs, labels = inputs.to(device), labels.to(device)
-
-        # Zero the parameter gradients
-        optimizer.zero_grad()
-
-        # Forward pass
-        outputs = model(inputs)
-        loss = criterion(outputs, labels)
-
-        # Backward pass
-        loss.backward()
-        optimizer.step()
-
-        running_loss += loss.item()
-
-        # Accuracy calculation
-        _, predicted = torch.max(outputs, 1)
-        total += labels.size(0)
-        correct += (predicted == labels).sum().item()
-
-    # Calculate average loss and accuracy
-    epoch_loss = running_loss / len(train_loader)
-    epoch_accuracy = 100 * correct / total
-
-    print(f"Epoch [{epoch + 1}/{num_epochs}], Loss: {epoch_loss:.4f}, Accuracy: {epoch_accuracy:.2f}%")
-    torch.save(model.state_dict(), f"/home/abghamtm/work/masking_comparison/checkpoint/classifier/resnet50/weights_epoch{str(epoch + 1).zfill(2)}.pth")
-
-# Define classifier and load saved model(weights)
-classifier = resnet50(pretrained=False)
-models_list = os.listdir("/home/abghamtm/work/masking_comparison/checkpoint/classifier/resnet50/")
-models_list.sort()
-for model_name in models_list:
-    print(model_name)
-    classifier.load_state_dict(torch.load(os.path.join("/home/abghamtm/work/masking_comparison/checkpoint/classifier/resnet50/",model_name)))
-    classifier.to(device)
-    classifier.eval()  # Set model to evaluation mode
-    correct = 0
-    total = 0
-    total_loss = 0
-
-    with torch.no_grad():
-        for inputs, labels in tqdm(test_loader):
-            inputs = preprocess(inputs)
+    # 🏋️ Training loop
+    for epoch in range(num_epochs):
+        model.train()
+        for inputs, labels in train_loader:
             inputs, labels = inputs.to(device), labels.to(device)
-            outputs = classifier(inputs)
-            _, predicted = torch.max(outputs, 1)
-            total += labels.size(0)
-            correct += (predicted == labels).sum().item()
+            optimizer.zero_grad()
+            outputs = model(inputs)
             loss = criterion(outputs, labels)
-            total_loss += loss.item()
+            loss.backward()
+            optimizer.step()
 
-    accuracy = correct / total
-    print(f'Accuracy: {accuracy * 100:.2f}%')
-    print(f'loss: {total_loss:.2f}%')
+        # 🔍 Validation
+        model.eval()
+        val_preds, val_labels = [], []
+        val_loss = 0.0
+        with torch.no_grad():
+            for inputs, labels in val_loader:
+                inputs, labels = inputs.to(device), labels.to(device)
+                outputs = model(inputs)
+                loss = criterion(outputs, labels)
+                val_loss += loss.item() * inputs.size(0)
+                _, preds = outputs.max(1)
+                val_preds.extend(preds.cpu().numpy())
+                val_labels.extend(labels.cpu().numpy())
 
+        val_loss /= len(val_labels)
+        val_acc = accuracy_score(val_labels, val_preds)
+        scheduler.step(val_loss)
+
+        print(f"Epoch {epoch+1}/{num_epochs} | Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f}")
+        mlflow.log_metric("val_loss", val_loss, step=epoch)
+        mlflow.log_metric("val_accuracy", val_acc, step=epoch)
+
+    # Track the best model
+    global best_model_acc, best_model_state
+    if val_acc > best_model_acc:
+        best_model_acc = val_acc
+        best_model_state = model.state_dict()
+
+    # 📊 Confusion matrix
+    cm = confusion_matrix(val_labels, val_preds)
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=train_set.classes)
+    disp.plot(cmap='Blues', xticks_rotation='vertical')
+    plt.title("Validation Confusion Matrix")
+    cm_path = f"confusion_matrix_trial_{trial.number}.png"
+    plt.savefig(cm_path)
+    plt.close()
+
+    # 📁 Log metrics and model
+    mlflow.log_artifact(cm_path)
+    mlflow.pytorch.log_model(model, "model")
+    mlflow.end_run()
+
+    return val_acc
+
+# 🚀 Run Optuna study
+study = optuna.create_study(direction='maximize')
+study.optimize(objective, n_trials=10)
+
+# Save best model weights
+torch.save(best_model_state, "best_model.pth")
+print("✅ Best model saved to best_model.pth")
+
+# 🏆 Best hyperparameters
+print("Best hyperparameters found:")
+for key, value in study.best_params.items():
+    print(f"{key}: {value}")
+
+# 🔧 Load best hyperparameters from Optuna
+best_params = study.best_params
+lr = best_params['lr']
+weight_decay = best_params['weight_decay']
+batch_size = best_params['batch_size']
+num_epochs = best_params['num_epochs']
+
+# 🔄 Combine train + val
+full_train_set = ConcatDataset([train_set, val_set])
+train_loader = DataLoader(full_train_set, batch_size=batch_size, shuffle=True)
+test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False)
+
+# 📁 Directory to save models
+os.makedirs("saved_models", exist_ok=True)
+
+# 🧠 Track best model
+best_test_acc = 0.0
+best_model_path = None
+
+# 🏋️ Retrain and evaluate multiple times
+for run_id in range(3):
+    print(f"\n🔁 Retraining model #{run_id + 1}")
+    mlflow.start_run(run_name=f"Retrain_Run_{run_id + 1}")
+
+    mlflow.log_params({
+        "lr": lr,
+        "weight_decay": weight_decay,
+        "batch_size": batch_size,
+        "num_epochs": num_epochs,
+        "run_id": run_id + 1
+    })
+
+    model = models.resnet50(weights=None)
+    model.fc = nn.Linear(model.fc.in_features, num_classes)
+    model.load_state_dict(torch.load("best_model.pth"))
+    model.to(device)
+
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=3)
+
+    for epoch in range(num_epochs):
+        model.train()
+        running_loss = 0.0
+        correct = 0
+        total = 0
+
+        for inputs, labels in train_loader:
+            inputs, labels = inputs.to(device), labels.to(device)
+            optimizer.zero_grad()
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+
+            running_loss += loss.item() * inputs.size(0)
+            _, predicted = outputs.max(1)
+            correct += predicted.eq(labels).sum().item()
+            total += labels.size(0)
+
+        train_loss = running_loss / total
+        train_acc = correct / total
+        scheduler.step(train_loss)
+
+        print(f"Epoch {epoch+1}/{num_epochs} | Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f}")
+        mlflow.log_metric("train_loss", train_loss, step=epoch)
+        mlflow.log_metric("train_accuracy", train_acc, step=epoch)
+
+    model_path = f"saved_models/model_run_{run_id + 1}.pth"
+    torch.save(model.state_dict(), model_path)
+    print(f"✅ Model #{run_id + 1} saved to {model_path}")
+    mlflow.pytorch.log_model(model, "model")
+
+    model.eval()
+    test_preds, test_labels = [], []
+    with torch.no_grad():
+        for inputs, labels in test_loader:
+            inputs, labels = inputs.to(device), labels.to(device)
+            outputs = model(inputs)
+            _, preds = outputs.max(1)
+            test_preds.extend(preds.cpu().numpy())
+            test_labels.extend(labels.cpu().numpy())
+
+    test_acc = accuracy_score(test_labels, test_preds)
+    print(f"🎯 Model #{run_id + 1} Test Accuracy: {test_acc:.4f}")
+    mlflow.log_metric("test_accuracy", test_acc)
+
+    cm = confusion_matrix(test_labels, test_preds)
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=train_set.classes)
+    disp.plot(cmap='Blues', xticks_rotation='vertical') 
+    plt.title("Best Model Test Confusion Matrix") 
+    plt.savefig("best_model_confusion_matrix.png") 
+    plt.show()
