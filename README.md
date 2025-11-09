@@ -38,7 +38,7 @@ Implementation Pipeline/Stages:
             **tmux new -s imagenet1K**
             run the script by one of the following command
             then detach the session without closing the session by **Ctrl + b, then d**
-            to reopen the session we must run **tmux attach -t vqvae_train**
+            to reopen the session we must run **tmux attach -t imagenet1K**
         ✅ Use full config:
             bash
             torchrun --nproc_per_node=4 train.py --config config.yaml
