@@ -68,9 +68,9 @@ def main():
 
     # Load datasets
     path_cfg = config['path']
-    train_set = CustomImageNetDataV2(image_dir=path_cfg['image_net_train'], image_type='original', folder_label='int_id')
-    val_set = CustomImageNetDataV2(image_dir=path_cfg['image_net_val'], image_type='original', folder_label='int_id')
-    test_set = CustomImageNetDataV2(image_dir=path_cfg['image_net_test'], image_type='original', folder_label='int_id')
+    train_set = CustomImageNetDataV2(image_dir=path_cfg['image_net_train'], image_type='original', folder_label='word_net_id')
+    val_set = CustomImageNetDataV2(image_dir=path_cfg['image_net_val'], image_type='original', folder_label='word_net_id')
+    # test_set = CustomImageNetDataV2(image_dir=path_cfg['image_net_test'], image_type='original', folder_label='word_net_id')
 
     model_path = path_cfg['vqvae_model']
     os.makedirs(model_path, exist_ok=True)
@@ -86,8 +86,8 @@ def main():
     latent_loss_weight = best_params['latent_loss_weight']
     diversity_loss_weight = best_params['diversity_loss_weight']
     num_epochs = best_params['num_epochs']
-    lr = best_params['lr']
-    weight_decay = best_params['weight_decay']
+    lr = float(best_params['lr'])
+    weight_decay = float(best_params['weight_decay'])
 
     # Train on train+val
     full_set = torch.utils.data.ConcatDataset([train_set, val_set])
