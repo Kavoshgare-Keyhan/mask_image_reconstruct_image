@@ -3,7 +3,9 @@ path:
   image_net_train: /local/reyhasjb/datasets/Imagenet1k/train
   image_net_val: /local/reyhasjb/datasets/Imagenet1k/val
   image_net_test: 
-  recnstructed_imge: /home/abghamtm/work/mask_image_reconstruct_image/image/reconstructed
+  recnstructed_imge: 
+    train: /home/abghamtm/work/mask_image_reconstruct_image/image/reconstructed/train
+    val: /home/abghamtm/work/mask_image_reconstruct_image/image/reconstructed/val
   vqvae_model: /home/abghamtm/work/mask_image_reconstruct_image/vqvae
   classifier_model: /home/abghamtm/work/mask_image_reconstruct_image/resnet
   distilbert_model: /home/abghamtm/work/mask_image_reconstruct_image/distilbert
