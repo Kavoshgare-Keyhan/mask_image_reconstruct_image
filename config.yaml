@@ -1,12 +1,14 @@
 path:
-  image_net: /local/reyhasjb/datasets/Imagenet #100 class or 1000 class
-  image_net_train: /home/mohsen/Desktop/Academia/MasterRUB/ResearchProjects/INI/masking_comparison/image/data/mini_imagenet_train
-  image_net_val: /home/mohsen/Desktop/Academia/MasterRUB/ResearchProjects/INI/masking_comparison/image/data/mini_imagenet_val
-  image_net_test: /home/mohsen/Desktop/Academia/MasterRUB/ResearchProjects/INI/masking_comparison/image/data/mini_imagenet_test 
-  recnstructed_imge: /home/abghamtm/work/masking_comparison/image/reconstruction/ #100 or 1000 classes
-  vqvae_model: /home/abghamtm/work/masking_comparison/model_checkpoints/vqvae/
-  classifier_model:
-  distilbert_model: 
+  image_net: /local/reyhasjb/datasets/Imagenet1k #1000 classes of imagenet - contains both train and validation sets
+  image_net_train: /local/reyhasjb/datasets/Imagenet1k/train
+  image_net_val: /local/reyhasjb/datasets/Imagenet1k/val
+  image_net_test: 
+  recnstructed_imge: 
+    train: /home/abghamtm/work/mask_image_reconstruct_image/image/reconstructed/train
+    val: /home/abghamtm/work/mask_image_reconstruct_image/image/reconstructed/val
+  vqvae_model: /home/abghamtm/work/mask_image_reconstruct_image/vqvae
+  classifier_model: /home/abghamtm/work/mask_image_reconstruct_image/resnet
+  distilbert_model: /home/abghamtm/work/mask_image_reconstruct_image/distilbert
 
 params:
   vqvae:
@@ -24,4 +26,4 @@ multiprocessing:
   gpu:
     gpu_ids: 
     threshold: 5.0
-    filter_by_threshold: true
+    filter_by_threshold: True

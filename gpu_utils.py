@@ -8,11 +8,12 @@ def get_gpu_usage():
     usage = [(i, int(u.split(',')[0]) / int(u.split(',')[1]) * 100) for i, u in enumerate(lines)]
     return {i: round(percent, 2) for i, percent in usage}
 
-def select_gpus(config):
+def select_gpus(config, verbose=False):
     usage = get_gpu_usage()
-    print("GPU Usage:")
-    for i, p in usage.items():
-        print(f"  GPU {i}: {p}% used")
+    if verbose:
+        print("GPU Usage:")
+        for i, p in usage.items():
+            print(f"  GPU {i}: {p}% used")
 
     selected = list(usage.keys())
 
@@ -26,6 +27,6 @@ def select_gpus(config):
         print("No GPUs match the criteria. Defaulting to GPU 0.")
         selected = [0]
 
-    print(f"Selected GPUs: {selected}")
-    return selected, len(selected)
+    if verbose: print(f"Selected GPUs: {selected}")
+    return selected
 

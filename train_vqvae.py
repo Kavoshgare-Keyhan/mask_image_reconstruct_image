@@ -20,13 +20,23 @@ def load_config(path):
         return yaml.safe_load(f)
 
 # ---------- Distributed Setup ----------
-def setup_distributed():
-    rank = int(os.environ['RANK'])
-    world_size = int(os.environ['WORLD_SIZE'])
-    local_rank = int(os.environ['LOCAL_RANK'])
-    torch.cuda.set_device(local_rank)
+def setup_distributed(selected_gpu_ids):
+    # Try to get values from torchrun or environment
+    rank = int(os.environ.get('RANK', 0))
+    world_size = int(os.environ.get('WORLD_SIZE', len(selected_gpu_ids)))
+    local_rank = int(os.environ.get('LOCAL_RANK', 0))
+
+    # Fallback for pure python run
+    if 'RANK' not in os.environ:
+        print("⚠️ Environment variables for distributed training not found. Assuming single-process fallback.")
+        os.environ['RANK'] = str(rank)
+        os.environ['WORLD_SIZE'] = str(world_size)
+        os.environ['LOCAL_RANK'] = str(local_rank)
+
+    torch.cuda.set_device(selected_gpu_ids[local_rank])
     dist.init_process_group(backend='nccl', rank=rank, world_size=world_size)
     return rank, world_size, local_rank
+
 
 # ---------- Loader ----------
 def get_loader(dataset, batch_size, shuffle, distributed, world_size=None, rank=None):
@@ -52,15 +62,15 @@ def load_best_model_path(model_path):
 def main():
     args = parse_args()
     config = load_config(args.config)
-    selected_gpu_ids, world_size = select_gpus(config['multiprocessing']['gpu'])
-    rank, _, local_rank = setup_distributed()
+    selected_gpu_ids = select_gpus(config['multiprocessing']['gpu'])
+    rank, world_size, local_rank = setup_distributed(selected_gpu_ids)
     device = torch.device(f"cuda:{selected_gpu_ids[local_rank]}")
 
     # Load datasets
     path_cfg = config['path']
-    train_set = CustomImageNetDataV2(image_dir=path_cfg['image_net_train'], image_type='original', folder_label='int_id')
-    val_set = CustomImageNetDataV2(image_dir=path_cfg['image_net_val'], image_type='original', folder_label='int_id')
-    test_set = CustomImageNetDataV2(image_dir=path_cfg['image_net_test'], image_type='original', folder_label='int_id')
+    train_set = CustomImageNetDataV2(image_dir=path_cfg['image_net_train'], image_type='original', folder_label='word_net_id')
+    val_set = CustomImageNetDataV2(image_dir=path_cfg['image_net_val'], image_type='original', folder_label='word_net_id')
+    # test_set = CustomImageNetDataV2(image_dir=path_cfg['image_net_test'], image_type='original', folder_label='word_net_id')
 
     model_path = path_cfg['vqvae_model']
     os.makedirs(model_path, exist_ok=True)
@@ -76,8 +86,8 @@ def main():
     latent_loss_weight = best_params['latent_loss_weight']
     diversity_loss_weight = best_params['diversity_loss_weight']
     num_epochs = best_params['num_epochs']
-    lr = best_params['lr']
-    weight_decay = best_params['weight_decay']
+    lr = float(best_params['lr'])
+    weight_decay = float(best_params['weight_decay'])
 
     # Train on train+val
     full_set = torch.utils.data.ConcatDataset([train_set, val_set])

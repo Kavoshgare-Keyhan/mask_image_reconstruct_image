@@ -34,6 +34,11 @@ Implementation Pipeline/Stages:
             - Normalization: Normalize input data consistently across all splits.
             - Use MLflow or Neptune to track the errors
     🚀 Running Instructions
+        > First open a new session to prevent termination due to any reason
+            **tmux new -s imagenet1K**
+            run the script by one of the following command
+            then detach the session without closing the session by **Ctrl + b, then d**
+            to reopen the session we must run **tmux attach -t imagenet1K**
         ✅ Use full config:
             bash
             torchrun --nproc_per_node=4 train.py --config config.yaml
@@ -47,7 +52,7 @@ Implementation Pipeline/Stages:
             bash
             torchrun --nproc_per_node=4 train.py --config config.yaml --gpu_ids 1 3 --threshold 5.0 --filter_by_threshold
         ✅ Automatically detect available gpus below specific threshold
-            torchrun --nproc_per_node=$(python -c "import yaml; cfg=yaml.safe_load(open('config.yaml')); from gpu_utils import select_gpus; print(len(select_gpus(cfg['multiprocessing']['gpu'])[0]))") train_vqvae.py --config config.yaml
+            torchrun --nproc_per_node=$(python -c "import yaml; cfg=yaml.safe_load(open('config.yaml')); from gpu_utils import select_gpus; print(len(select_gpus(cfg['multiprocessing']['gpu'], verbose=False)))") train_vqvae.py --config config.yaml
 
 
 *Current Issues:
