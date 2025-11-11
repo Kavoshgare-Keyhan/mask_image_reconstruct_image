@@ -85,7 +85,7 @@ def main():
     batch_size = best_params['batch_size']
     latent_loss_weight = best_params['latent_loss_weight']
     diversity_loss_weight = best_params['diversity_loss_weight']
-    num_epochs = best_params['num_epochs']
+    num_epochs = best_params['num_epochs'] - 1
     lr = float(best_params['lr'])
     weight_decay = float(best_params['weight_decay'])
 
