@@ -52,7 +52,7 @@ Implementation Pipeline/Stages:
             bash
             torchrun --nproc_per_node=4 train.py --config config.yaml --gpu_ids 1 3 --threshold 5.0 --filter_by_threshold
         ✅ Automatically detect available gpus below specific threshold
-            torchrun --nproc_per_node=$(python -c "import yaml; cfg=yaml.safe_load(open('config.yaml')); from gpu_utils import select_gpus; print(len(select_gpus(cfg['multiprocessing']['gpu'], verbose=False)))") train_vqvae.py --config config.yaml
+            torchrun --nproc_per_node=$(python -c "import yaml; cfg=yaml.safe_load(open('config.yaml')); from gpu_utils import select_gpus; print(len(select_gpus(cfg['multiprocessing']['gpu'], verbose=False)))") {your_code}.py --config config.yaml
 
 
 *Current Issues:
