@@ -117,7 +117,7 @@ def main():
         # Start run with descriptive name and tags
         run_context = mlflow.start_run(
             run_name="vqvae_final_training",
-            tags={"model_type": "vqvae", "git_commit": commit}
+            tags={"model_type": "vqvae_training", "git_commit": commit}
         )
 
         # Log hyperparameters
