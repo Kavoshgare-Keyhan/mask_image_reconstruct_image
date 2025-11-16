@@ -35,10 +35,10 @@ Implementation Pipeline/Stages:
             - Use MLflow or Neptune to track the errors
     🚀 Running Instructions
         > First open a new session to prevent termination due to any reason
-            **tmux new -s imagenet1K**
+            **tmux new -s {your_session_name}**
             run the script by one of the following command
             then detach the session without closing the session by **Ctrl + b, then d**
-            to reopen the session we must run **tmux attach -t imagenet1K**
+            to reopen the session we must run **tmux attach -t {your_session_name}**
         ✅ Use full config:
             bash
             torchrun --nproc_per_node=4 train.py --config config.yaml
