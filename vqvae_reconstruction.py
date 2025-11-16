@@ -58,17 +58,54 @@ def load_params(model_path):
     return None
 
 # ---------- MLflow Retrieve Best Epoch ----------
-def get_best_epoch_from_mlflow():
+def get_params_from_mlflow():
     '''
     Retrieve the parameters either best or preset by user along with best epoch number from MLflow logged parameters.
     '''
     client = MlflowClient()
     runs = client.search_runs(experiment_ids=["0"])
-    return runs.data.params, runs.data.metrics.get("val_loss", float("inf"))
+    for run in runs:
+    #     if run.data.tags.get("model_type") == "vqvae_training":
+    #         return run.data.params, int(run.data.params['best_epoch'])
+    # raise ValueError("No suitable MLflow run found for VQ-VAE training.")
+        params = run.data.params
+        val_loss = run.data.metrics.get("val_loss", float("inf"))
+    return params, val_loss
 
 # ---------- Load Best Model Path----------
 def load_best_model_path(model_path, epoch):
     return os.path.join(model_path, f"model_epoch_{epoch}_vqvae_80x80_codebook_144x456.pth")
+
+# Robust checkpoint loading (handles 'module.' prefix differences)
+def load_checkpoint_into(model, ckpt_path, map_location=None):
+    state = torch.load(ckpt_path, map_location=map_location)
+    # If a full checkpoint dict (with 'state_dict'), prioritize that:
+    if isinstance(state, dict) and 'state_dict' in state:
+        state_dict = state['state_dict']
+    else:
+        state_dict = state
+
+    # If model is DDP, model.module is actual module; get its state_dict keys to decide
+    target_module = model.module if hasattr(model, 'module') else model
+
+    # If keys in checkpoint all start with "module." and target keys don't, strip prefixes
+    ck_keys = list(state_dict.keys())
+    if len(ck_keys) > 0 and ck_keys[0].startswith('module.') and not any(k.startswith('module.') for k in target_module.state_dict().keys()):
+        new_state = {}
+        for k, v in state_dict.items():
+            new_state[k.replace('module.', '', 1)] = v
+        state_dict = new_state
+
+    # Vice versa: if checkpoint keys don't have 'module.' but target expects them, add prefix
+    target_keys = list(target_module.state_dict().keys())
+    if len(target_keys) > 0 and target_keys[0].startswith('module.') and not ck_keys[0].startswith('module.'):
+        new_state = {}
+        for k, v in state_dict.items():
+            new_state['module.' + k] = v
+        state_dict = new_state
+
+    # Finally load (use strict=False to be tolerant)
+    target_module.load_state_dict(state_dict, strict=False)
 
 # ---------- Main ----------
 def main():
@@ -90,7 +127,7 @@ def main():
 
     # Load parameters
     try:
-        params_mlflow, val_loss = get_best_epoch_from_mlflow()
+        params_mlflow, val_loss = get_params_from_mlflow()
         epoch_least_val_loss = int(params_mlflow['best_epoch'])
         batch_size = int(params_mlflow['batch_size'])
         latent_loss_weight = float(params_mlflow['latent_loss_weight'])
@@ -102,15 +139,18 @@ def main():
         latent_loss_weight = trained_params['latent_loss_weight']
         diversity_loss_weight = trained_params['diversity_loss_weight']
         epoch_least_val_loss = trained_params['num_epochs'] - 1
+        _, val_loss = get_params_from_mlflow()
         # lr = float(trained_params['lr'])
         # weight_decay = float(trained_params['weight_decay'])
 
     # Load best model checkpoint
     model_ckpt = load_best_model_path(model_path, epoch = epoch_least_val_loss)
     model = FlatVQVAE().to(device)
+    load_checkpoint_into(model, model_ckpt, map_location=device)
+
     if dist.is_initialized():
         model = DDP(model, device_ids=[device.index])
-    model.load_state_dict(torch.load(model_ckpt))
+
     recon_criterion = nn.MSELoss()
 
     # ---------- MLflow Logging ----------
@@ -139,7 +179,10 @@ def main():
     tr_indices = [] # indices of all images - latent space
     tr_quantizes = [] # codebooks of all images
     tr_labels = [] # labels of all images
-    # test_loss = 0.0
+
+    # create base_model reference to underlying module when needed
+    base_model = model.module if hasattr(model, 'module') else model
+
     with torch.no_grad():
         for j, (inputs, labels) in tqdm(enumerate(train_loader)):
             inputs = inputs.to(device)
@@ -149,18 +192,19 @@ def main():
             # test_loss += loss.item() * inputs.size(0)
 
             ## ----------- store codebook, latent space, and corresponding labels -------------
-            quant_b, _, id_b, _, _ = model.encode(inputs)
-            outputs = model.decode(quant_b)
+            quant_b, _, id_b, _, _ = base_model.encode(inputs)
+            outputs = base_model.decode(quant_b)
             tr_indices.append(id_b.cpu())
             tr_quantizes.append(quant_b.cpu())
             tr_labels.extend(labels.cpu().numpy())
             ### ---------- save reconstructed images ----------------
             for idx, (label, out) in enumerate(zip(labels, outputs)):
                 print(label)
-                class_folder = os.path.join(path_cfg['recnstructed_imge']['train'], str(label.item()))
-                os.makedirs(class_folder, exist_ok=True)
-                save_file = os.path.join(class_folder, f"{label.item()}_{j * train_loader.batch_size + idx + 1:05d}.npy")
-                Image.fromarray(out.cpu().numpy()).save(save_file) 
+                tr_class_folder = os.path.join(path_cfg['recnstructed_imge']['train'], str(label.item()))
+                os.makedirs(tr_class_folder, exist_ok=True)
+                save_tr_file = os.path.join(tr_class_folder, f"{label.item()}_{j * train_loader.batch_size + idx + 1:05d}.npy")
+                np.save(save_tr_file, out.cpu().numpy())
+
 
     # Concatenate all indices into a single tensor and save it
     tr_indices_tensor = torch.cat(tr_indices, dim=0)
@@ -190,18 +234,18 @@ def main():
             # test_loss += loss.item() * inputs.size(0)
 
             ## ----------- store codebook, latent space, and corresponding labels -------------
-            quant_b, _, id_b, _, _ = model.encode(inputs)
-            outputs = model.decode(quant_b)
+            quant_b, _, id_b, _, _ = base_model.encode(inputs)
+            outputs = base_model.decode(quant_b)
             val_indices.append(id_b.cpu())
             val_quantizes.append(quant_b.cpu())
             val_labels.extend(labels.cpu().numpy())
             ### ---------- save reconstructed images ----------------
             for idx, (label, out) in enumerate(zip(labels, outputs)):
                 print(label)
-                class_folder = os.path.join(path_cfg['recnstructed_imge']['val'], str(label.item()))
-                os.makedirs(class_folder, exist_ok=True)
-                save_file = os.path.join(class_folder, f"{label.item()}_{j * val_loader.batch_size + idx + 1:05d}.npy")
-                Image.fromarray(out.cpu().numpy()).save(save_file) 
+                val_class_folder = os.path.join(path_cfg['recnstructed_imge']['val'], str(label.item()))
+                os.makedirs(val_class_folder, exist_ok=True)
+                save_val_file = os.path.join(val_class_folder, f"{label.item()}_{j * val_loader.batch_size + idx + 1:05d}.npy")
+                np.save(save_val_file, out.cpu().numpy())
 
     # Concatenate all indices into a single tensor and save it
     val_indices_tensor = torch.cat(val_indices, dim=0)
