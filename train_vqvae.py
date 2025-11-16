@@ -1,4 +1,4 @@
-import os, yaml, argparse, json, torch, mlflow
+import os, yaml, argparse, json, torch, mlflow, subprocess
 from torch import nn, optim
 from torch.nn.parallel import DistributedDataParallel as DDP
 from vqvae import FlatVQVAE
@@ -108,7 +108,19 @@ def main():
 
     # ---------- MLflow Logging ----------
     if rank == 0:
-        mlflow.start_run(run_name="vqvae_final_training")
+        # Create or set experiment (vqvae_experiment will get its own folder under mlruns)
+        mlflow.set_experiment("vqvae_experiment")
+
+        # Get current git commit hash for reproducibility
+        commit = subprocess.check_output(["git", "rev-parse", "HEAD"]).strip().decode()
+
+        # Start run with descriptive name and tags
+        run_context = mlflow.start_run(
+            run_name="vqvae_final_training",
+            tags={"model_type": "vqvae", "git_commit": commit}
+        )
+
+        # Log hyperparameters
         mlflow.log_params({
             "batch_size": batch_size,
             "latent_loss_weight": latent_loss_weight,
@@ -118,69 +130,71 @@ def main():
             "weight_decay": weight_decay
         })
 
-    model.train()
-    if model_ckpt:
-        for epoch in range(num_epochs):
-            train_loss = 0.0
-            for inputs, _ in full_loader:
-                inputs = inputs.to(device)
-                optimizer.zero_grad()
-                recon, latent_loss, diversity_loss, _ = model(inputs)
-                recon_loss = recon_criterion(recon, inputs)
-                loss = recon_loss + latent_loss_weight * latent_loss + diversity_loss_weight * diversity_loss
-                loss.backward()
-                optimizer.step()
-                train_loss += loss.item() * inputs.size(0)
-
-            train_loss /= len(full_loader.dataset)
-            if rank == 0:
-                mlflow.log_metric("train_loss", train_loss, step=epoch)
-                print(f"[Epoch {epoch+1}] Train Loss: {train_loss:.4f}")
-            save_path_model = os.path.join(model_path, f"model_epoch_{epoch}_vqvae_80x80_codebook_144x456.pth")
-            torch.save(model.state_dict(), save_path_model)
-    else:
-        least_val_loss = float('inf')
-        for epoch in range(num_epochs):
-            train_loss = 0.0
-            for inputs, _ in train_loader:
-                inputs = inputs.to(device)
-                optimizer.zero_grad()
-                recon, latent_loss, diversity_loss, _ = model(inputs)
-                recon_loss = recon_criterion(recon, inputs)
-                loss = recon_loss + latent_loss_weight * latent_loss + diversity_loss_weight * diversity_loss
-                loss.backward()
-                optimizer.step()
-                train_loss += loss.item() * inputs.size(0)
-
-            train_loss /= len(train_loader.dataset)
-
-            model.eval()
-            val_loss = 0.0
-            with torch.no_grad():
-                for inputs, _ in val_loader:
+    try:
+        # ---------- Training ----------
+        model.train()
+        if model_ckpt:
+            for epoch in range(num_epochs):
+                train_loss = 0.0
+                for inputs, _ in full_loader:
                     inputs = inputs.to(device)
+                    optimizer.zero_grad()
                     recon, latent_loss, diversity_loss, _ = model(inputs)
                     recon_loss = recon_criterion(recon, inputs)
                     loss = recon_loss + latent_loss_weight * latent_loss + diversity_loss_weight * diversity_loss
-                    val_loss += loss.item() * inputs.size(0)
+                    loss.backward()
+                    optimizer.step()
+                    train_loss += loss.item() * inputs.size(0)
 
-            val_loss /= len(val_loader.dataset)
-            if rank == 0:
-                mlflow.log_metric("train_loss", train_loss, step=epoch)
-                mlflow.log_metric("val_loss", val_loss, step=epoch)
-                print(f"[Epoch {epoch+1}] Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
-
-            if val_loss < least_val_loss:
-                least_val_loss = val_loss
-            else:
-                print(f'Least Validation Loss is {least_val_loss: .4f} and belongs to epoch {epoch}')
+                train_loss /= len(full_loader.dataset)
+                if rank == 0:
+                    mlflow.log_metric("train_loss", train_loss, step=epoch)
+                    print(f"[Epoch {epoch+1}] Train Loss: {train_loss:.4f}")
                 save_path_model = os.path.join(model_path, f"model_epoch_{epoch}_vqvae_80x80_codebook_144x456.pth")
                 torch.save(model.state_dict(), save_path_model)
-                if rank == 0:
-                    mlflow.log_artifact(save_path_model)
+        else:
+            least_val_loss = float('inf')
+            for epoch in range(num_epochs):
+                train_loss = 0.0
+                for inputs, _ in train_loader:
+                    inputs = inputs.to(device)
+                    optimizer.zero_grad()
+                    recon, latent_loss, diversity_loss, _ = model(inputs)
+                    recon_loss = recon_criterion(recon, inputs)
+                    loss = recon_loss + latent_loss_weight * latent_loss + diversity_loss_weight * diversity_loss
+                    loss.backward()
+                    optimizer.step()
+                    train_loss += loss.item() * inputs.size(0)
 
-    if rank == 0:
-        mlflow.end_run()
+                train_loss /= len(train_loader.dataset)
+
+                model.eval()
+                val_loss = 0.0
+                with torch.no_grad():
+                    for inputs, _ in val_loader:
+                        inputs = inputs.to(device)
+                        recon, latent_loss, diversity_loss, _ = model(inputs)
+                        recon_loss = recon_criterion(recon, inputs)
+                        loss = recon_loss + latent_loss_weight * latent_loss + diversity_loss_weight * diversity_loss
+                        val_loss += loss.item() * inputs.size(0)
+
+                val_loss /= len(val_loader.dataset)
+                if rank == 0:
+                    mlflow.log_metric("train_loss", train_loss, step=epoch)
+                    mlflow.log_metric("val_loss", val_loss, step=epoch)
+                    print(f"[Epoch {epoch+1}] Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
+
+                if val_loss < least_val_loss:
+                    least_val_loss = val_loss
+                else:
+                    print(f'Least Validation Loss is {least_val_loss: .4f} and belongs to epoch {epoch}')
+                    save_path_model = os.path.join(model_path, f"model_epoch_{epoch}_vqvae_80x80_codebook_144x456.pth")
+                    torch.save(model.state_dict(), save_path_model)
+                    if rank == 0:
+                        mlflow.log_artifact(save_path_model)
+    finally:
+        if rank == 0:
+            mlflow.end_run()
 
 if __name__ == "__main__":
     main()
