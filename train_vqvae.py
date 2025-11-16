@@ -186,11 +186,14 @@ def main():
 
                 if val_loss < least_val_loss:
                     least_val_loss = val_loss
+                    epoch_least_val_loss = epoch+1
                 else:
-                    print(f'Least Validation Loss is {least_val_loss: .4f} and belongs to epoch {epoch}')
-                    save_path_model = os.path.join(model_path, f"model_epoch_{epoch}_vqvae_80x80_codebook_144x456.pth")
+                    print(f'Least Validation Loss is {least_val_loss: .4f} and belongs to epoch {epoch_least_val_loss}')
+                    save_path_model = os.path.join(model_path, f"model_epoch_{epoch+1}_vqvae_80x80_codebook_144x456.pth")
                     torch.save(model.state_dict(), save_path_model)
                     if rank == 0:
+                        # Log "best" information
+                        mlflow.log_param("best_epoch", epoch_least_val_loss)
                         mlflow.log_artifact(save_path_model)
     finally:
         if rank == 0:
