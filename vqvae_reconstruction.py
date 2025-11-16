@@ -1,4 +1,5 @@
-import os, yaml, argparse, json, torch, mlflow
+import os, yaml, argparse, json, torch, mlflow, subprocess
+from mlflow.tracking import MlflowClient
 from torch import nn, optim
 from torch.nn.parallel import DistributedDataParallel as DDP
 from vqvae import FlatVQVAE
@@ -45,15 +46,27 @@ def get_loader(dataset, batch_size, shuffle, distributed, world_size=None, rank=
     return CustomLoader(dataset, batch_size=batch_size, shuffle=shuffle,
                         distributed=distributed, world_size=world_size, rank=rank).data_loader
 
-# ---------- Load Best Params ----------
-def load_best_params(model_path):
+# ---------- Load Params ----------
+def load_params(model_path):
+    '''
+    Load initial parameters from the config file used during training if there is no retrieved best parameters from MLflow.
+    '''
     for fname in os.listdir(model_path):
         if fname.startswith("best_vqvae_params_trial_") and fname.endswith(".json"):
             with open(os.path.join(model_path, fname), 'r') as f:
                 return json.load(f)
     return None
 
-# ---------- Load Best Model ----------
+# ---------- MLflow Retrieve Best Epoch ----------
+def get_best_epoch_from_mlflow():
+    '''
+    Retrieve the parameters either best or preset by user along with best epoch number from MLflow logged parameters.
+    '''
+    client = MlflowClient()
+    runs = client.search_runs(experiment_ids=["0"])
+    return runs.data.params, runs.data.metrics.get("val_loss", float("inf"))
+
+# ---------- Load Best Model Path----------
 def load_best_model_path(model_path, epoch):
     return os.path.join(model_path, f"model_epoch_{epoch}_vqvae_80x80_codebook_144x456.pth")
 
@@ -75,22 +88,25 @@ def main():
     model_path = path_cfg['vqvae_model']
     os.makedirs(model_path, exist_ok=True)
 
-    # Load best parameters
-    best_params = load_best_params(model_path)
-    if best_params is None:
-        print("⚠️ No best params found. Using defaults from config.")
-        best_params = config['params']['vqvae']
-
-    # Extract hyperparameters
-    batch_size = best_params['batch_size']
-    latent_loss_weight = best_params['latent_loss_weight']
-    diversity_loss_weight = best_params['diversity_loss_weight']
-    num_epochs = best_params['num_epochs'] - 1
-    lr = float(best_params['lr'])
-    weight_decay = float(best_params['weight_decay'])
+    # Load parameters
+    try:
+        params_mlflow, val_loss = get_best_epoch_from_mlflow()
+        epoch_least_val_loss = int(params_mlflow['best_epoch'])
+        batch_size = int(params_mlflow['batch_size'])
+        latent_loss_weight = float(params_mlflow['latent_loss_weight'])
+        diversity_loss_weight = float(params_mlflow['diversity_loss_weight'])
+    except:
+        trained_params = config['params']['vqvae']
+        # Extract hyperparameters
+        batch_size = trained_params['batch_size']
+        latent_loss_weight = trained_params['latent_loss_weight']
+        diversity_loss_weight = trained_params['diversity_loss_weight']
+        epoch_least_val_loss = trained_params['num_epochs'] - 1
+        # lr = float(trained_params['lr'])
+        # weight_decay = float(trained_params['weight_decay'])
 
     # Load best model checkpoint
-    model_ckpt = load_best_model_path(model_path, epoch = num_epochs)
+    model_ckpt = load_best_model_path(model_path, epoch = epoch_least_val_loss)
     model = FlatVQVAE().to(device)
     if dist.is_initialized():
         model = DDP(model, device_ids=[device.index])
@@ -99,14 +115,21 @@ def main():
 
     # ---------- MLflow Logging ----------
     if rank == 0:
-        mlflow.start_run(run_name="vqvae_test_and_reconstructing")
+        # Create or set experiment (vqvae_experiment will get its own folder under mlruns)
+        mlflow.set_experiment("reconstruction_experiment")
+
+        # Get current git commit hash for reproducibility
+        commit = subprocess.check_output(["git", "rev-parse", "HEAD"]).strip().decode()
+
+        # Start run with descriptive name and tags
+        run_context = mlflow.start_run(
+            run_name="vqvae_reconstruction_run",
+            tags={"model_type": "vqvae_reconstruction", "git_commit": commit}
+        )
         mlflow.log_params({
             "batch_size": batch_size,
-            "latent_loss_weight": latent_loss_weight,
-            "diversity_loss_weight": diversity_loss_weight,
-            "num_epochs": num_epochs,
-            "lr": lr,
-            "weight_decay": weight_decay
+            "val_loss": val_loss,
+            "chosen_model": f'model_epoch_{epoch_least_val_loss}_vqvae_80x80_codebook_144x456.pth'
         })
 
     # ---------- Test Evaluation ----------
@@ -136,7 +159,7 @@ def main():
                 print(label)
                 class_folder = os.path.join(path_cfg['recnstructed_imge']['train'], str(label.item()))
                 os.makedirs(class_folder, exist_ok=True)
-                save_file = os.path.join(class_folder, f"{label.item()}_{j * train_loader.batch_size + idx + 1:05d}.png")
+                save_file = os.path.join(class_folder, f"{label.item()}_{j * train_loader.batch_size + idx + 1:05d}.npy")
                 Image.fromarray(out.cpu().numpy()).save(save_file) 
 
     # Concatenate all indices into a single tensor and save it
@@ -177,7 +200,7 @@ def main():
                 print(label)
                 class_folder = os.path.join(path_cfg['recnstructed_imge']['val'], str(label.item()))
                 os.makedirs(class_folder, exist_ok=True)
-                save_file = os.path.join(class_folder, f"{label.item()}_{j * val_loader.batch_size + idx + 1:05d}.png")
+                save_file = os.path.join(class_folder, f"{label.item()}_{j * val_loader.batch_size + idx + 1:05d}.npy")
                 Image.fromarray(out.cpu().numpy()).save(save_file) 
 
     # Concatenate all indices into a single tensor and save it
@@ -198,5 +221,8 @@ def main():
     if rank == 0:
         # mlflow.log_metric("test_loss", test_loss)
         mlflow.end_run()
+
+if __name__ == "__main__":
+    main()    
 
 
