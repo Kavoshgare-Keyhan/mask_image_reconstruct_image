@@ -1,11 +1,10 @@
-import os, json, urllib.request
+import os, json, urllib.request, random
 from PIL import Image
-from torch.utils.data import Dataset, Subset, DataLoader
+from torch.utils.data import Dataset, Subset, DataLoader, ConcatDataset
 from torchvision import transforms
 from torchvision.datasets import ImageFolder
 from sklearn.model_selection import StratifiedShuffleSplit
 from torch.utils.data.distributed import DistributedSampler
-import torch.distributed as dist
 
 class CustomImageNetDataV1(Dataset): # Inheriting from Dataset  a must to work seamlessly with PyTorch’s data loading ecosystem (DataLoader, Subset, ConcatDataset). PyTorch expects a dataset object and by passing Dataset can verify the output is a dataset object
     def __init__(self, img_dir: str, img_type: str):
@@ -162,24 +161,26 @@ class CustomImageNetDataV2(ImageFolder):
 
 
 class CustomLoader:
-    def __init__(self, dataset, batch_size, threads = 4, shuffle = True, distributed = False, world_size = None, rank = None,  split = False,
-                 val=False, train_size=0.7, test_size=0.5, train_size_adj=0.1):
+    def __init__(self, dataset, batch_size, threads=4, shuffle=True, distributed=False,
+                 world_size=None, rank=None, split=False, val=False,
+                 train_size=0.7, test_size=0.5, train_size_adj=0.1, pin_memory=False):
         """
-        Robust loader wrapper that accepts ImageFolder-like datasets, Subset, ConcatDataset, or any nesting thereof.
-        It extracts labels safely for stratified splits and for informational purposes.
+        dataset: dataset object (ImageFolder, Subset, ConcatDataset, etc.)
+        threads: number of DataLoader workers (num_workers)
+        pin_memory: whether to use pin_memory in DataLoader
+        distributed: whether to use DistributedSampler (for DDP)
+        world_size, rank: used when distributed is True
         """
         self._dataset = dataset
         self._batch_size = batch_size
         self._threads = threads
         self._shuffle = shuffle
-
-        # distributed settings
         self._distributed = distributed
         self._world_size = world_size
         self._rank = rank
+        self._pin_memory = pin_memory
 
-        # Try to extract labels from the dataset (supports ImageFolder.samples,
-        # torch.utils.data.Subset, torch.utils.data.ConcatDataset)
+        # extract labels if possible (same logic as original file)
         self._labels = self._extract_labels_from_dataset(dataset)
 
         if split:
@@ -189,83 +190,6 @@ class CustomLoader:
         else:
             self._data_loader = self._create_full_loader()
             self._train_loader = self._val_loader = self._test_loader = None
-
-    def _extract_labels_from_dataset(self, dataset):
-        """
-        Return a flat list of labels for the given dataset. Handles:
-          - ImageFolder-like datasets (dataset.samples)
-          - Subset (dataset.dataset + dataset.indices)
-          - ConcatDataset (dataset.datasets)
-        Recurses into nested containers.
-        """
-        labels = []
-
-        # Import here to avoid top-level dependency issues if module reloaded
-        from torch.utils.data import Subset, ConcatDataset
-
-        # ImageFolder-like object exposing .samples = list[(path, label)]
-        if hasattr(dataset, 'samples') and isinstance(dataset.samples, (list, tuple)):
-            try:
-                labels.extend([lab for _, lab in dataset.samples])
-                return labels
-            except Exception:
-                pass
-
-        # Subset: has .dataset and .indices
-        if isinstance(dataset, Subset):
-            parent = dataset.dataset
-            indices = dataset.indices
-            # If parent has samples, extract by index
-            if hasattr(parent, 'samples'):
-                parent_samples = parent.samples
-                for i in indices:
-                    labels.append(parent_samples[i][1])
-                return labels
-            else:
-                # Fallback: try to get elements by __getitem__ (costly)
-                try:
-                    for i in indices:
-                        item = parent[i]  # expected (image, label)
-                        if isinstance(item, (list, tuple)) and len(item) >= 2:
-                            labels.append(item[1])
-                        else:
-                            raise RuntimeError("Unable to extract label from parent __getitem__ result")
-                    return labels
-                except Exception:
-                    pass
-
-        # ConcatDataset: iterate over underlying datasets
-        if isinstance(dataset, ConcatDataset):
-            for ds in dataset.datasets:
-                sub_labels = self._extract_labels_from_dataset(ds)
-                if sub_labels:
-                    labels.extend(sub_labels)
-            if labels:
-                return labels
-
-        # Generic dataset: try to infer by indexing sequentially (last resort)
-        try:
-            # attempt to iterate once to collect labels (be conservative)
-            # many datasets implement __len__ and __getitem__
-            length = len(dataset)
-            for i in range(length):
-                item = dataset[i]
-                if isinstance(item, (list, tuple)) and len(item) >= 2:
-                    labels.append(item[1])
-                else:
-                    # if the dataset returns dict-like object
-                    if isinstance(item, dict) and 'label' in item:
-                        labels.append(item['label'])
-                    else:
-                        raise RuntimeError("Unexpected item format from dataset __getitem__")
-            return labels
-        except Exception:
-            pass
-
-        # If we reach here, we couldn't recover labels
-        print("⚠️ Warning: Could not extract labels from the provided dataset. "
-              "Certain functions (stratified split) will not work properly.")
-        return []
 
     @property
     def labels(self):
@@ -287,6 +211,49 @@ class CustomLoader:
     def data_loader(self):
         return self._data_loader
 
+    def _extract_labels_from_dataset(self, dataset):
+        labels = []
+        try:
+            # ImageFolder-like with .samples
+            if hasattr(dataset, 'samples') and isinstance(dataset.samples, (list, tuple)):
+                labels.extend([lab for _, lab in dataset.samples])
+                return labels
+            # Subset
+            if isinstance(dataset, Subset):
+                parent = dataset.dataset
+                indices = dataset.indices
+                if hasattr(parent, 'samples'):
+                    parent_samples = parent.samples
+                    for i in indices:
+                        labels.append(parent_samples[i][1])
+                    return labels
+                else:
+                    for i in indices:
+                        item = parent[i]
+                        if isinstance(item, (list, tuple)) and len(item) >= 2:
+                            labels.append(item[1])
+                    return labels
+            # ConcatDataset
+            if isinstance(dataset, ConcatDataset):
+                for ds in dataset.datasets:
+                    sub_labels = self._extract_labels_from_dataset(ds)
+                    if sub_labels:
+                        labels.extend(sub_labels)
+                if labels:
+                    return labels
+            # fallback: iterate (last resort)
+            length = len(dataset)
+            for i in range(length):
+                item = dataset[i]
+                if isinstance(item, (list, tuple)) and len(item) >= 2:
+                    labels.append(item[1])
+                elif isinstance(item, dict) and 'label' in item:
+                    labels.append(item['label'])
+            return labels
+        except Exception:
+            print("⚠️ Warning: Could not extract labels from dataset.")
+            return []
+
     def _create_full_loader(self):
         sampler = DistributedSampler(self._dataset, num_replicas=self._world_size, rank=self._rank) if self._distributed else None
         return DataLoader(
@@ -295,19 +262,16 @@ class CustomLoader:
             shuffle=(sampler is None and self._shuffle),
             sampler=sampler,
             num_workers=self._threads,
-            pin_memory=True
+            pin_memory=self._pin_memory
         )
 
     def _create_data_loaders(self, val, train_size, test_size, train_size_adj):
         if not val:
-            # Use labels for stratified split if available; otherwise fallback to random split
             if not self._labels:
-                # fallback random split if labels unavailable
                 total = len(self._dataset)
                 train_n = int((train_size + train_size_adj) * total)
                 indices = list(range(total))
                 if self._shuffle:
-                    import random
                     random.shuffle(indices)
                 train_idx = indices[:train_n]
                 test_idx = indices[train_n:]
@@ -323,21 +287,20 @@ class CustomLoader:
 
             return (
                 DataLoader(train_dataset, batch_size=self._batch_size, shuffle=(train_sampler is None and self._shuffle),
-                           sampler=train_sampler, num_workers=self._threads, pin_memory=True),
+                           sampler=train_sampler, num_workers=self._threads, pin_memory=self._pin_memory),
                 None,
                 DataLoader(test_dataset, batch_size=self._batch_size, shuffle=(test_sampler is None and self._shuffle),
-                           sampler=test_sampler, num_workers=self._threads, pin_memory=True)
+                           sampler=test_sampler, num_workers=self._threads, pin_memory=self._pin_memory)
             )
         else:
-            # the original val=True branch - attempt to use labels if available
             if not self._labels:
-                raise RuntimeError("Validation split requested but labels could not be inferred for stratified split.")
+                raise RuntimeError("Validation split requested but labels could not be inferred.")
             splitter = StratifiedShuffleSplit(n_splits=1, test_size=0.3, random_state=42)
             train_idx, temp_idx = next(splitter.split(range(len(self._labels)), self._labels))
 
             temp_labels = [self._labels[i] for i in temp_idx]
             splitter2 = StratifiedShuffleSplit(n_splits=1, test_size=test_size, random_state=42)
-            val_rel_idx, test_rel_idx = next(splitter2.split([self._labels[i] for i in temp_idx], temp_labels))
+            val_rel_idx, test_rel_idx = next(splitter2.split(temp_labels, temp_labels))
 
             val_idx = [temp_idx[i] for i in val_rel_idx]
             test_idx = [temp_idx[i] for i in test_rel_idx]
@@ -352,24 +315,9 @@ class CustomLoader:
 
             return (
                 DataLoader(train_dataset, batch_size=self._batch_size, shuffle=(train_sampler is None and self._shuffle),
-                           sampler=train_sampler, num_workers=self._threads, pin_memory=True),
+                           sampler=train_sampler, num_workers=self._threads, pin_memory=self._pin_memory),
                 DataLoader(val_dataset, batch_size=self._batch_size, shuffle=(val_sampler is None and self._shuffle),
-                           sampler=val_sampler, num_workers=self._threads, pin_memory=True),
+                           sampler=val_sampler, num_workers=self._threads, pin_memory=self._pin_memory),
                 DataLoader(test_dataset, batch_size=self._batch_size, shuffle=(test_sampler is None and self._shuffle),
-                           sampler=test_sampler, num_workers=self._threads, pin_memory=True)
+                           sampler=test_sampler, num_workers=self._threads, pin_memory=self._pin_memory)
             )
-
-# train_loader = DataLoader(
-#     dataset=train_dataset,
-#     batch_size=32,
-#     shuffle=True,
-#     num_workers=4,
-#     pin_memory=True  # Recommended for CUDA
-# )
-
-# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-# # Move Data to CUDA in Training Loop
-# for images, labels in train_loader:
-#     images = images.to(device)
-#     labels = labels.to(device)
-#     # Forward pass, loss, etc.
