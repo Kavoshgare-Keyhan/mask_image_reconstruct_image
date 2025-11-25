@@ -1,7 +1,9 @@
 path:
   image_net: /local/reyhasjb/datasets/Imagenet1k #1000 classes of imagenet - contains both train and validation sets
   image_net_train: /local/reyhasjb/datasets/Imagenet1k/train
+  image_net_train_local: /home/abghamtm/work/datasets/Imagenet1k/train
   image_net_val: /local/reyhasjb/datasets/Imagenet1k/val
+  image_net_val_local: /home/abghamtm/work/datasets/Imagenet1k/val
   image_net_test: 
   recnstructed_image: 
     train: /home/abghamtm/work/mask_image_reconstruct_image/image/reconstructed/train
