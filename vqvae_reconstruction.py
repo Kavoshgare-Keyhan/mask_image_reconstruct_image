@@ -7,14 +7,8 @@ Memory-safe VQ-VAE reconstruction script.
 - Does NOT save reconstructed images (user choice).
 """
 
-import os
-import yaml
-import argparse
-import json
-import torch
-import subprocess
-import numpy as np
-import h5py
+import os, yaml, argparse, torch, subprocess, h5py, mlflow
+from mlflow.tracking import MlflowClient
 from torch import nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 from vqvae import FlatVQVAE
@@ -116,13 +110,6 @@ def start_mlflow_if_rank0(rank, config, params_log):
     if rank != 0:
         return None
 
-    try:
-        import mlflow
-        from mlflow.tracking import MlflowClient
-    except Exception as e:
-        print("⚠️ mlflow not available:", e)
-        return None
-
     mlflow.set_experiment(config.get('mlflow_experiment', 'reconstruction_experiment'))
     commit = None
     try:
@@ -142,7 +129,6 @@ def end_mlflow_if_rank0(rank, run):
     if rank != 0 or run is None:
         return
     try:
-        import mlflow
         mlflow.end_run()
     except Exception:
         pass
@@ -162,8 +148,12 @@ def main():
     os.makedirs(model_path, exist_ok=True)
 
     # prepare datasets
-    train_set = CustomImageNetDataV2(image_dir=path_cfg['image_net_train'], image_type='original', folder_label='word_net_id')
-    val_set = CustomImageNetDataV2(image_dir=path_cfg['image_net_val'], image_type='original', folder_label='word_net_id')
+    try:
+        train_set = CustomImageNetDataV2(image_dir=path_cfg['image_net_train'], image_type='original', folder_label='word_net_id')
+        val_set = CustomImageNetDataV2(image_dir=path_cfg['image_net_val'], image_type='original', folder_label='word_net_id')
+    except:
+        train_set = CustomImageNetDataV2(image_dir=path_cfg['image_net_train_local'], image_type='original', folder_label='word_net_id')
+        val_set = CustomImageNetDataV2(image_dir=path_cfg['image_net_val_local'], image_type='original', folder_label='word_net_id')
 
     # get params: try mlflow fallback to config
     batch_size = cfg['params']['vqvae'].get('batch_size', 32)
@@ -171,7 +161,6 @@ def main():
 
     # If mlflow has run with saved params, try to use it (non-fatal)
     try:
-        from mlflow.tracking import MlflowClient
         client = MlflowClient()
         runs = client.search_runs(experiment_ids=["0"]) or []
         if runs:
