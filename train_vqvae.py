@@ -72,7 +72,7 @@ def main():
     val_set = CustomImageNetDataV2(image_dir=path_cfg['image_net_val'], image_type='original', folder_label='word_net_id')
     # test_set = CustomImageNetDataV2(image_dir=path_cfg['image_net_test'], image_type='original', folder_label='word_net_id')
 
-    model_path = path_cfg['vqvae_model']
+    model_path = path_cfg['model']['vqvae']
     os.makedirs(model_path, exist_ok=True)
 
     # Load best parameters
