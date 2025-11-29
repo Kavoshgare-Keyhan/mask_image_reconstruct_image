@@ -144,7 +144,7 @@ def main():
 
     # path config
     path_cfg = cfg['path']
-    model_path = path_cfg['vqvae_model']
+    model_path = path_cfg['model']['vqvae']
     os.makedirs(model_path, exist_ok=True)
 
     # prepare datasets
