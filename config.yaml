@@ -8,9 +8,11 @@ path:
   recnstructed_image: 
     train: /home/abghamtm/work/mask_image_reconstruct_image/image/reconstructed/train
     val: /home/abghamtm/work/mask_image_reconstruct_image/image/reconstructed/val
-  vqvae_model: /home/abghamtm/work/mask_image_reconstruct_image/models_checkpoint/vqvae
-  classifier_model: /home/abghamtm/work/mask_image_reconstruct_image/models_checkpoint/resnet
-  distilbert_model: /home/abghamtm/work/mask_image_reconstruct_image/models_checkpoint/distilbert
+  model: 
+    vqvae: /home/abghamtm/work/mask_image_reconstruct_image/models_checkpoint/vqvae
+    vqvae_pretrained: /home/abghamtm/work/mask_image_reconstruct_image/models_checkpoint/vqvae/reconstruction_outputs
+    classifier: /home/abghamtm/work/mask_image_reconstruct_image/models_checkpoint/resnet
+    distilbert: /home/abghamtm/work/mask_image_reconstruct_image/models_checkpoint/distilbert
 
 params:
   vqvae:
@@ -22,7 +24,7 @@ params:
     weight_decay: 1e-4
 
 credentials:
-  neptune_api_token: eyJhcGlfYWRkcmVzcyI6Imh0dHBzOi8vYXBwLm5lcHR1bmUuYWkiLCJhcGlfdXJsIjoiaHR0cHM6Ly9hcHAubmVwdHVuZS5haSIsImFwaV9rZXkiOiIwODg4OTU0Yy0xODAyLTRiM2QtYjYzYi0xMWQxYThmYWJlOWQifQ==
+  neptune_api_token: ??
 
 multiprocessing:
   gpu:
