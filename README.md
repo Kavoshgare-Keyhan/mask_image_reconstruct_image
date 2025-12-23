@@ -39,21 +39,26 @@ Implementation Pipeline/Stages:
             run the script by one of the following command
             then detach the session without closing the session by **Ctrl + b, then d**
             to reopen the session we must run **tmux attach -t {your_session_name}**
-        ✅ Use full config:
-            bash
-            torchrun --nproc_per_node=4 train.py --config config.yaml
-        ✅ Override GPU selection:
-            bash
-            torchrun --nproc_per_node=4 train.py --config config.yaml --gpu_ids 1 3
-        ✅ Filter by threshold:
-            bash
-            torchrun --nproc_per_node=4 train.py --config config.yaml --threshold 5.0 --filter_by_threshold
-        ✅ Combine both:
-            bash
-            torchrun --nproc_per_node=4 train.py --config config.yaml --gpu_ids 1 3 --threshold 5.0 --filter_by_threshold
-        ✅ Automatically detect available gpus below specific threshold
-            torchrun --nproc_per_node=$(python -c "import yaml; cfg=yaml.safe_load(open('config.yaml')); from gpu_utils import select_gpus; print(len(select_gpus(cfg['multiprocessing']['gpu'], verbose=False)))") {your_code}.py --config config.yaml
-
+        > Second run the script:
+            ✅ Use full config:
+                bash
+                torchrun --nproc_per_node=4 script_name.py --config config.yaml
+            ✅ Override GPU selection:
+                bash
+                torchrun --nproc_per_node=2 script_name.py --config config.yaml --gpu_ids 1 3
+                > **Note** value of nproc_per_node must match the numbers of gpu_ids
+            ✅ Filter by threshold:
+                bash
+                torchrun --nproc_per_node=4 script_name.py --config config.yaml --threshold 5.0 --filter_by_threshold
+            ✅ Combine both:
+                bash
+                torchrun --nproc_per_node=2 train.py --config config.yaml --gpu_ids 1 3 --threshold 5.0 --filter_by_threshold
+                > **Note** value of nproc_per_node must match the numbers of gpu_ids
+            ✅ Automatically detect available gpus below specific threshold
+                torchrun --nproc_per_node=$(python -c "import yaml; cfg=yaml.safe_load(open('config.yaml')); from gpu_utils import select_gpus; print(len(select_gpus(cfg['multiprocessing']['gpu'], verbose=False)))") {your_code}.py --config config.yaml
+            > **Note** using `TORCH_SHOW_CPP_STACKTRACES=1 TORCH_DISTRIBUTED_DEBUG=DETAIL` before has two-folds:
+                1. helps us to track “If a C++ backend error happens, show the full C++ stack trace.” With this flag, you get a full C++ call stack, which often reveals the real cause (e.g., invalid device index, deadlock, shape mismatch, etc.)
+                2. This enables PyTorch’s distributed debugging mode.
 
 *Current Issues:
 1. model has no train method
