@@ -5,13 +5,17 @@ path:
   image_net_val: /local/reyhasjb/datasets/Imagenet1k/val
   image_net_val_local: /home/abghamtm/work/datasets/Imagenet1k/val
   image_net_test: 
-  recnstructed_image: 
-    train: /home/abghamtm/work/mask_image_reconstruct_image/image/reconstructed/train
-    val: /home/abghamtm/work/mask_image_reconstruct_image/image/reconstructed/val
+  recnstructed_storage: 
+    image:
+      train: /home/abghamtm/work/mask_image_reconstruct_image/reconstruction/image/reconstructed/train
+      val: /home/abghamtm/work/mask_image_reconstruct_image/reconstruction/image/reconstructed/val
+    latent_space: /home/abghamtm/work/mask_image_reconstruct_image/reconstruction/latent_space
   model: 
     vqvae: /home/abghamtm/work/mask_image_reconstruct_image/models_checkpoint/vqvae
-    vqvae_pretrained: /home/abghamtm/work/mask_image_reconstruct_image/models_checkpoint/vqvae/reconstruction_outputs
-    classifier: /home/abghamtm/work/mask_image_reconstruct_image/models_checkpoint/resnet
+    classifier: 
+      resnet:
+        dir: /home/abghamtm/work/mask_image_reconstruct_image/models_checkpoint/resnet
+
     distilbert: /home/abghamtm/work/mask_image_reconstruct_image/models_checkpoint/distilbert
 
 params:
@@ -22,6 +26,7 @@ params:
     num_epochs: 100
     lr: 1e-4
     weight_decay: 1e-4
+    best_model_epoch: 28
 
 credentials:
   neptune_api_token: ??
